@@ -206,20 +206,13 @@ __global__  void hamiltInitB_k(const int devid,
 	return;
 }
 
-template<int BDIM_X,
-	 int BDIM_Y,
-	 int LOOP_X,
-	 int LOOP_Y,
-	 int BITXSP,
-	 typename INT_T,
-	 typename INT2_T>
-__global__ void hamiltInitW_k(const int xsl,
-			      const int ysl,
-			      const long long begY,
-		              const long long dimX,
-		              const INT2_T *__restrict__ hamB,
-		                    INT2_T *__restrict__ hamW) {
 
+template<int BDIM_X, int BDIM_Y, int LOOP_X, int LOOP_Y, int BITXSP, typename INT_T, typename INT2_T>
+__global__ void hamiltInitW_k(const int xsl, const int ysl, const long long begY,
+		              					  const long long dimX,
+		              				    const INT2_T *__restrict__ hamB,
+		                    		  INT2_T *__restrict__ hamW)
+{
 	const int tidx = threadIdx.x;
 	const int tidy = threadIdx.y;
 
@@ -326,20 +319,12 @@ __global__ void hamiltInitW_k(const int xsl,
 }
 
 
-template<int BDIM_X,
-	 int BDIM_Y,
-	 int TILE_X,
-	 int TILE_Y,
-	 int FRAME_X,
-	 int FRAME_Y,
-	 typename INT2_T>
-__device__ void loadTile(const int slX,
-			 const int slY,
-			 const long long begY,
-			 const long long dimX,
-			 const INT2_T *__restrict__ v,
-			       INT2_T tile[][TILE_X+2*FRAME_X]) {
-
+template<int BDIM_X, int BDIM_Y, int TILE_X, int TILE_Y, int FRAME_X, int FRAME_Y, typename INT2_T>
+__device__ void loadTile(const int slX, const int slY, const long long begY,
+			 									 const long long dimX,
+			 								 	 const INT2_T *__restrict__ v,
+			       		 				 INT2_T tile[][TILE_X+2*FRAME_X])
+{
 	const int blkx = blockIdx.x;
 	const int blky = blockIdx.y;
 
@@ -409,18 +394,9 @@ __device__ void loadTile(const int slX,
 	return;
 }
 
-template<int BDIM_X,
-	 int BDIM_Y,
-	 int LOOP_X,
-	 int LOOP_Y,
-	 int BITXSP,
-	 int COLOR,
-	 typename INT_T,
-	 typename INT2_T>
-__global__
-void spinUpdateV_2D_k(const int devid,
-		      const long long seed,
-		      const int it,
+
+template<int BDIM_X, int BDIM_Y, int LOOP_X, int LOOP_Y, int BITXSP, int COLOR, typename INT_T, typename INT2_T>
+__global__ void spinUpdateV_2D_k(const int devid, const long long seed, const int it,
 		      const int slX, // sublattice size grid_width of one color (in words)
 		      const int slY, // sublattice size grid_height of one color
 		      const long long begY,
@@ -428,8 +404,8 @@ void spinUpdateV_2D_k(const int devid,
 		      const float vExp[][5],
 		      const INT2_T *__restrict__ jDst,
 		      const INT2_T *__restrict__ vSrc,
-		            INT2_T *__restrict__ vDst) {
-
+		            INT2_T *__restrict__ vDst)
+{
 	const int SPIN_X_WORD = 8*sizeof(INT_T)/BITXSP;
 
 	const int tidx = threadIdx.x;
@@ -442,10 +418,8 @@ void spinUpdateV_2D_k(const int devid,
 		 BDIM_Y*LOOP_Y,
 		 1, 1, INT2_T>(slX, slY, begY, dimX, vSrc, shTile);
 
-	// __shExp[cur_s{0,1}][sum_s{0,1}] = __expf(-2*cur_s{-1,+1}*F{+1,-1}(sum_s{0,1})*INV_TEMP)
 	__shared__ float __shExp[2][5];
 
-	// for small lattices BDIM_X/grid_height may be smaller than 2/5
 	#pragma unroll
 	for(int i = 0; i < 2; i += BDIM_Y) {
 		#pragma unroll
@@ -618,11 +592,10 @@ void spinUpdateV_2D_k(const int devid,
 	return;
 }
 
-template<int BDIM_X,
-	 int WSIZE,
-	 typename T>
-__device__ __forceinline__ T __block_sum(T v) {
 
+template<int BDIM_X, int WSIZE, typename T>
+__device__ __forceinline__ T __block_sum(T v)
+{
 	__shared__ T sh[BDIM_X/WSIZE];
 
 	const int lid = threadIdx.x%WSIZE;
@@ -682,8 +655,9 @@ __global__ void getMagn_k(const long long n,
 	return;
 }
 
-static void usage(const int SPIN_X_WORD, const char *pname) {
 
+static void usage(const int SPIN_X_WORD, const char *pname)
+{
         const char *bname = rindex(pname, '/');
         if (!bname) {bname = pname;}
         else        {bname++;}
@@ -767,15 +741,16 @@ static void usage(const int SPIN_X_WORD, const char *pname) {
 		"\t\tEnables the file dump of  the lattice  every time  the magnetization is printed.\n"
 		"\t\tDefault: off\n\n",
                 bname,
-		2*SPIN_X_WORD*2*BLOCK_X*BMULT_X,
-		BLOCK_Y*BMULT_Y,
+		2 * SPIN_X_WORD * 2 * BLOCK_X * BMULT_X,
+		BLOCK_Y * BMULT_Y,
 		TOTAL_UPDATES_DEFAULT,
 		SEED_DEFAULT,
 		ALPHA_DEF,
 		ALPHA_DEF*CRIT_TEMP,
 		MAX_CORR_LEN);
-        exit(EXIT_SUCCESS);
+    exit(EXIT_SUCCESS);
 }
+
 
 static void countSpins(const int redBlocks,
 								       const size_t total_length,
