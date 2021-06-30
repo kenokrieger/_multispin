@@ -325,52 +325,6 @@ __global__ void hamiltInitW_k(const int xsl,
 	return;
 }
 
-template<int BDIM_X,
-	 int BDIM_Y,
-	 int TILE_X,
-	 int TILE_Y,
-	 int FRAME_X,
-	 int FRAME_Y,
-	 typename INT_T,
-	 typename INT2_T>
-__device__ void loadTileOLD(const long long begY,
-			    const long long dimY,
-			    const long long dimX,
-			    const INT2_T *__restrict__ v,
-			          INT2_T tile[][TILE_X+2*FRAME_X]) {
-
-	const int tidx = threadIdx.x;
-	const int tidy = threadIdx.y;
-
-	const int blkx = blockIdx.x;
-	const int blky = blockIdx.y;
-
-	const int FULL_X = TILE_X+2*FRAME_X;
-	const int FULL_Y = TILE_Y+2*FRAME_Y;
-
-	#pragma unroll
-	for(int j = 0; j < FULL_Y; j += BDIM_Y) {
-
-		const int yoff = begY + blky*TILE_Y + j+tidy - FRAME_Y;
-
-		const int yoffAdj = (yoff < 0) ? dimY+yoff : (yoff >= dimY ? yoff-dimY : yoff);
-
-		#pragma unroll
-		for(int i = 0; i < FULL_X; i += BDIM_X) {
-
-			const int xoff = blkx*TILE_X + i+tidx - FRAME_X;
-
-			const int xoffAdj = (xoff < 0) ? dimX+xoff : (xoff >= dimX ? xoff-dimX : xoff);
-
-			INT2_T __t = v[yoffAdj*dimX + xoffAdj];
-
-			if (j+tidy < FULL_Y && i+tidx < FULL_X) {
-				tile[j+tidy][i+tidx] = __t;
-			}
-		}
-	}
-	return;
-}
 
 template<int BDIM_X,
 	 int BDIM_Y,
@@ -467,8 +421,8 @@ __global__
 void spinUpdateV_2D_k(const int devid,
 		      const long long seed,
 		      const int it,
-		      const int slX, // sublattice size X of one color (in words)
-		      const int slY, // sublattice size Y of one color
+		      const int slX, // sublattice size grid_width of one color (in words)
+		      const int slY, // sublattice size grid_height of one color
 		      const long long begY,
 		      const long long dimX, // ld
 		      const float vExp[][5],
@@ -491,7 +445,7 @@ void spinUpdateV_2D_k(const int devid,
 	// __shExp[cur_s{0,1}][sum_s{0,1}] = __expf(-2*cur_s{-1,+1}*F{+1,-1}(sum_s{0,1})*INV_TEMP)
 	__shared__ float __shExp[2][5];
 
-	// for small lattices BDIM_X/Y may be smaller than 2/5
+	// for small lattices BDIM_X/grid_height may be smaller than 2/5
 	#pragma unroll
 	for(int i = 0; i < 2; i += BDIM_Y) {
 		#pragma unroll
@@ -779,7 +733,7 @@ static void usage(const int SPIN_X_WORD, const char *pname) {
 		"\t\tDefault: disabled\n"
                 "\n"
                 "\t-c|--corr\n"
-		"\t\tDumps to a  file  named  corr_{X}x{Y}_T_{TEMP}  the  correlation  of each  point\n"
+		"\t\tDumps to a  file  named  corr_{grid_width}x{grid_height}_T_{TEMP}  the  correlation  of each  point\n"
 		"\t\twith the  %8$d points on the right and below.  The correlation is computed  every\n"
 		"\t\ttime the magnetization is printed on screen (based on either the  '-p'  or  '-e'\n"
 		"\t\toption) and it is written in the file one line per measure.\n"
@@ -823,58 +777,46 @@ static void usage(const int SPIN_X_WORD, const char *pname) {
         exit(EXIT_SUCCESS);
 }
 
-static void countSpins(const int ndev,
-		       const int redBlocks,
-		       const size_t llen,
-		       const size_t llenLoc,
-		       const unsigned long long *d_black_tiles,
-		       const unsigned long long *d_white_tiles,
-			     unsigned long long **sum_d,
-			     unsigned long long *bsum,
-			     unsigned long long *wsum) {
-
-	if (ndev == 1) {
-		CHECK_CUDA(cudaMemset(sum_d[0], 0, 2*sizeof(**sum_d)));
-		getMagn_k<THREADS, BIT_X_SPIN><<<redBlocks, THREADS>>>(llen, d_black_tiles, sum_d[0]);
-		CHECK_ERROR("getMagn_k");
-		CHECK_CUDA(cudaDeviceSynchronize());
-	} else {
-		for(int i = 0; i < ndev; i++) {
-
-			CHECK_CUDA(cudaSetDevice(i));
-			CHECK_CUDA(cudaMemset(sum_d[i], 0, 2*sizeof(**sum_d)));
-			getMagn_k<THREADS, BIT_X_SPIN><<<redBlocks, THREADS>>>(llenLoc, d_black_tiles + i*llenLoc, sum_d[i]);
-			getMagn_k<THREADS, BIT_X_SPIN><<<redBlocks, THREADS>>>(llenLoc, d_white_tiles + i*llenLoc, sum_d[i]);
-			CHECK_ERROR("getMagn_k");
-		}
-	}
+static void countSpins(const int redBlocks,
+								       const size_t total_length,
+								       const size_t sublattice_length,
+								       const unsigned long long *d_black_tiles,
+								       const unsigned long long *d_white_tiles,
+									     unsigned long long **sum_d,
+									     unsigned long long *bsum,
+									     unsigned long long *wsum)
+{
+	CHECK_CUDA(cudaMemset(sum_d[0], 0, 2*sizeof(**sum_d)));
+	getMagn_k<THREADS, BIT_X_SPIN><<<redBlocks, THREADS>>>(total_length, d_black_tiles, sum_d[0]);
+	CHECK_ERROR("getMagn_k");
+	CHECK_CUDA(cudaDeviceSynchronize());
 
 	bsum[0] = 0;
 	wsum[0] = 0;
 
-	unsigned long long  sum_h[MAX_GPU][2];
+	unsigned long long sum_h[0][2];
 
-	for(int i = 0; i < ndev; i++) {
-		CHECK_CUDA(cudaMemcpy(sum_h[i], sum_d[i], 2*sizeof(**sum_h), cudaMemcpyDeviceToHost));
-		bsum[0] += sum_h[i][0];
-		wsum[0] += sum_h[i][1];
-	}
+	CHECK_CUDA(cudaMemcpy(sum_h[0], sum_d[0], 2*sizeof(**sum_h), cudaMemcpyDeviceToHost));
+	bsum[0] += sum_h[0][0];
+	wsum[0] += sum_h[0][1];
+
 	return;
 }
+
 
 template<int BDIM_X,
 	 int BITXSP,
 	 int N_CORR,
-         typename INT_T,
+   typename INT_T,
 	 typename SUM_T>
 __global__ void getCorr2D_k(const int corrLen,
-			    const long long dimX,
-			    const long long dimY,
-			    const long long begY,
-			    const INT_T *__restrict__ black,
-			    const INT_T *__restrict__ white,
-				  SUM_T *__restrict__ corr) {
-
+												    const long long dimX,
+												    const long long dimY,
+												    const long long begY,
+												    const INT_T *__restrict__ black,
+												    const INT_T *__restrict__ white,
+													  SUM_T *__restrict__ corr)
+{
 	const int SPIN_X_WORD = 8*sizeof(INT_T)/BITXSP;
 
 	const int tid = threadIdx.x;
@@ -959,19 +901,21 @@ __global__ void getCorr2D_k(const int corrLen,
 	return;
 }
 
+
 template<int BDIM_X,
 	 int BITXSP,
 	 int N_CORR,
-         typename INT_T,
+   typename INT_T,
 	 typename SUM_T>
 __global__ void getCorr2DRepl_k(const int corrLen,
-				const long long dimX,
-				const long long begY,
-			        const long long slX, // sublattice size X of one color (in words)
-			        const long long slY, // sublattice size Y of one color
-				const INT_T *__restrict__ black,
-				const INT_T *__restrict__ white,
-				      SUM_T *__restrict__ corr) {
+																const long long dimX,
+																const long long begY,
+															  const long long slX, // sublattice size grid_width of one color (in words)
+															  const long long slY, // sublattice size grid_height of one color
+																const INT_T *__restrict__ black,
+																const INT_T *__restrict__ white,
+																      SUM_T *__restrict__ corr)
+{
 	const int tid = threadIdx.x;
 	const int SPIN_X_WORD = 8*sizeof(INT_T)/BITXSP;
 
@@ -1077,35 +1021,33 @@ int main(int argc, char **argv) {
 	cudaEvent_t start, stop;
   float elapsed_time;
 
-	const int SPIN_X_WORD = (8*sizeof(*d_spins)) / BIT_X_SPIN;
+	const int SPIN_X_WORD = (8 * sizeof(*d_spins)) / BIT_X_SPIN;
 
-	int X = 2048;
-	int Y = 2048;
+	int grid_width = 2048;
+	int grid_height = 2048;
 
 	int total_updates = TOTAL_UPDATES_DEFAULT;
 
 	unsigned long long seed = SEED_DEFAULT;
-
-	int ndev = 1;
 
 	float temp  = 0.666f;
 
 	int XSL = 0;
 	int YSL = 0;
 
-	if (!X || (X%2) || ((X/2)%(SPIN_X_WORD*2*BLOCK_X*BMULT_X))) {
-		fprintf(stderr, "\nPlease specify an X dim multiple of %d\n\n", 2 * SPIN_X_WORD * 2 * BLOCK_X * BMULT_X);
+	if (!grid_width || (grid_width % 2) || ((grid_width / 2) % (SPIN_X_WORD*2*BLOCK_X*BMULT_X))) {
+		fprintf(stderr, "\nPlease specify an grid_width dim multiple of %d\n\n", 2 * SPIN_X_WORD * 2 * BLOCK_X * BMULT_X);
 		usage(SPIN_X_WORD, argv[0]);
 		exit(EXIT_FAILURE);
 	}
-	if (!Y || (Y%(BLOCK_Y*BMULT_Y))) {
-		fprintf(stderr, "\nPlease specify a Y dim multiple of %d\n\n", BLOCK_Y * BMULT_Y);
+	if (!grid_height || (grid_height % (BLOCK_Y * BMULT_Y))) {
+		fprintf(stderr, "\nPlease specify a grid_height dim multiple of %d\n\n", BLOCK_Y * BMULT_Y);
 		usage(SPIN_X_WORD, argv[0]);
 		exit(EXIT_FAILURE);
 	}
 
-	XSL = X;
-	YSL = Y * ndev;
+	XSL = grid_width;
+	YSL = grid_height;
 
 	cudaDeviceProp props;
 
@@ -1120,51 +1062,47 @@ int main(int argc, char **argv) {
 
 	printf("\n");
 
-	size_t lld = (X / 2) / SPIN_X_WORD;
-
+	size_t words_per_row = (grid_width / 2) / SPIN_X_WORD;
 	// length of a single color section per GPU
-	size_t llenLoc = static_cast<size_t>(Y) * lld;
+	size_t sublattice_length = static_cast<size_t>(grid_height) * words_per_row;
+	// total lattice length
+	size_t total_length = 2ull * sublattice_length;
 
-	// total lattice length (all GPUs, all colors)
-	size_t llen = 2ull * ndev * llenLoc;
-
-	dim3 grid(DIV_UP(lld/2, BLOCK_X * BMULT_X), DIV_UP(Y, BLOCK_Y * BMULT_Y));
+	dim3 grid(DIV_UP(words_per_row / 2, BLOCK_X * BMULT_X), DIV_UP(grid_height, BLOCK_Y * BMULT_Y));
 	dim3 block(BLOCK_X, BLOCK_Y);
 
 	printf("Run configuration:\n");
 	printf("\tspin/word: %d\n", SPIN_X_WORD);
-	printf("\tspins: %zu\n", llen*SPIN_X_WORD);
+	printf("\tspins: %zu\n", total_length * SPIN_X_WORD);
 	printf("\tseed: %llu\n", seed);
 	printf("\titerations: %d\n", total_updates);
-	printf("\tblock (X, Y): %d, %d\n", block.x, block.y);
-	printf("\ttile  (X, Y): %d, %d\n", BLOCK_X*BMULT_X, BLOCK_Y*BMULT_Y);
-	printf("\tgrid  (X, Y): %d, %d\n", grid.x, grid.y);
+	printf("\tblock (x, y): %d, %d\n", block.x, block.y);
+	printf("\ttile  (x, y): %d, %d\n", BLOCK_X * BMULT_X, BLOCK_Y * BMULT_Y);
+	printf("\tgrid  (x, y): %d, %d\n", grid.x, grid.y);
 
 	printf("\ttemp: %f (%f*T_crit)\n", temp, temp / CRIT_TEMP);
 
 	printf("\n");
 
-	printf("\tlocal lattice size:      %8d x %8d\n",      Y, X);
-	printf("\ttotal lattice size:      %8d x %8d\n", ndev*Y, X);
-	printf("\tlocal lattice shape: 2 x %8d x %8zu (%12zu %s)\n",      Y, lld, llenLoc*2, sizeof(*d_spins) == 4 ? "uints" : "ulls");
-	printf("\ttotal lattice shape: 2 x %8d x %8zu (%12zu %s)\n", ndev*Y, lld,      llen, sizeof(*d_spins) == 4 ? "uints" : "ulls");
-	printf("\tmemory: %.2lf MB (%.2lf MB per GPU)\n", (llen*sizeof(*d_spins))/(1024.0*1024.0), llenLoc*2*sizeof(*d_spins)/(1024.0*1024.0));
+	printf("\tlattice size:      %8d x %8d\n", grid_height, grid_width);
+	printf("\tlattice shape: 2 x %8d x %8zu (%12zu %s)\n", grid_height, words_per_row, total_length, sizeof(*d_spins) == 4 ? "uints" : "ulls");
+	printf("\tmemory: %.2lf MB (%.2lf MB per GPU)\n", (total_length*sizeof(*d_spins))/(1024.0 * 1024.0), sublattice_length * 2 * sizeof(*d_spins) / (1024.0 * 1024.0));
 
-	const int redBlocks = MIN(DIV_UP(llen, THREADS),
+	const int redBlocks = MIN(DIV_UP(total_length, THREADS),
 				  (props.maxThreadsPerMultiProcessor/THREADS)*props.multiProcessorCount);
 
 	unsigned long long cntPos;
 	unsigned long long cntNeg;
 	unsigned long long *sum_d[MAX_GPU];
 
-	CHECK_CUDA(cudaMalloc(&d_spins, llen*sizeof(*d_spins)));
-	CHECK_CUDA(cudaMemset(d_spins, 0, llen*sizeof(*d_spins)));
+	CHECK_CUDA(cudaMalloc(&d_spins, total_length*sizeof(*d_spins)));
+	CHECK_CUDA(cudaMemset(d_spins, 0, total_length*sizeof(*d_spins)));
 
 	CHECK_CUDA(cudaMalloc(&sum_d[0], 2*sizeof(**sum_d)));
 
 
 	d_black_tiles = d_spins;
-	d_white_tiles = d_spins + llen/2;
+	d_white_tiles = d_spins + total_length/2;
 
 	float *exp_d[MAX_GPU];
 	float  exp_h[2][5];
@@ -1198,7 +1136,7 @@ int main(int argc, char **argv) {
 		      BIT_X_SPIN, C_BLACK,
 		      unsigned long long><<<grid, block>>>(0,
 							   seed,
-							   0, 0, lld/2,
+							   0, 0, words_per_row/2,
 							   reinterpret_cast<ulonglong2 *>(d_black_tiles));
 	CHECK_ERROR("initLattice_k");
 
@@ -1207,14 +1145,14 @@ int main(int argc, char **argv) {
 		      BIT_X_SPIN, C_WHITE,
 		      unsigned long long><<<grid, block>>>(0,
 							   seed,
-							   0, 0, lld/2,
+							   0, 0, words_per_row/2,
 							   reinterpret_cast<ulonglong2 *>(d_white_tiles));
 	CHECK_ERROR("initLattice_k");
 
 	// computes sum over array
-	countSpins(ndev, redBlocks, llen, llenLoc, d_black_tiles, d_white_tiles, sum_d, &cntPos, &cntNeg);
+	countSpins(redBlocks, total_length, sublattice_length, d_black_tiles, d_white_tiles, sum_d, &cntPos, &cntNeg);
 	printf("\nInitial magnetization: %9.6lf, up_s: %12llu, dw_s: %12llu\n",
-	       abs(static_cast<double>(cntPos)-static_cast<double>(cntNeg)) / (llen*SPIN_X_WORD),
+	       abs(static_cast<double>(cntPos)-static_cast<double>(cntNeg)) / (total_length*SPIN_X_WORD),
 	       cntPos, cntNeg);
 
 
@@ -1227,48 +1165,38 @@ int main(int argc, char **argv) {
 	for(iteration = 0; iteration < total_updates; iteration++) {
 
 		CHECK_CUDA(cudaSetDevice(0));
-		spinUpdateV_2D_k<BLOCK_X, BLOCK_Y,
-				 BMULT_X, BMULT_Y,
-				 BIT_X_SPIN, C_BLACK,
-				 unsigned long long><<<grid, block>>>(0,
-						 		      seed,
-								      iteration + 1,
-								      (XSL / 2) / SPIN_X_WORD / 2, YSL,
-								      0, /*ndev*Y,*/ lld/2,
-						 		      reinterpret_cast<float (*)[5]>(exp_d[0]),
-								      reinterpret_cast<ulonglong2 *>(hamW_d),
-								      reinterpret_cast<ulonglong2 *>(d_white_tiles),
-								      reinterpret_cast<ulonglong2 *>(d_black_tiles));
+		spinUpdateV_2D_k<BLOCK_X, BLOCK_Y, BMULT_X, BMULT_Y, BIT_X_SPIN, C_BLACK, unsigned long long>
+		<<<grid, block>>>
+		(0, seed, iteration + 1, (XSL / 2) / SPIN_X_WORD / 2, YSL, 0, words_per_row / 2,
+		 reinterpret_cast<float (*)[5]>(exp_d[0]),
+		 reinterpret_cast<ulonglong2 *>(hamW_d),
+		 reinterpret_cast<ulonglong2 *>(d_white_tiles),
+		 reinterpret_cast<ulonglong2 *>(d_black_tiles));
 
 		CHECK_CUDA(cudaSetDevice(0));
-		spinUpdateV_2D_k<BLOCK_X, BLOCK_Y,
-				 BMULT_X, BMULT_Y,
-				 BIT_X_SPIN, C_WHITE,
-				 unsigned long long><<<grid, block>>>(0,
-						 		      seed,
-								      iteration + 1,
-								      (XSL/2)/SPIN_X_WORD/2, YSL,
-								      0, /*ndev*Y,*/ lld/2,
-						 		      reinterpret_cast<float (*)[5]>(exp_d[0]),
-								      reinterpret_cast<ulonglong2 *>(hamB_d),
-								      reinterpret_cast<ulonglong2 *>(d_black_tiles),
-								      reinterpret_cast<ulonglong2 *>(d_white_tiles));
+		spinUpdateV_2D_k<BLOCK_X, BLOCK_Y, BMULT_X, BMULT_Y, BIT_X_SPIN, C_WHITE, unsigned long long>
+		<<<grid, block>>>
+		(0, seed, iteration + 1, (XSL / 2) / SPIN_X_WORD / 2, YSL, 0, words_per_row / 2,
+		 reinterpret_cast<float (*)[5]>(exp_d[0]),
+		 reinterpret_cast<ulonglong2 *>(hamB_d),
+		 reinterpret_cast<ulonglong2 *>(d_black_tiles),
+		 reinterpret_cast<ulonglong2 *>(d_white_tiles));
 	}
 	CHECK_CUDA(cudaEventRecord(stop, 0));
 	CHECK_CUDA(cudaEventSynchronize(stop));
 
 	// compute total sum
-	countSpins(ndev, redBlocks, llen, llenLoc, d_black_tiles, d_white_tiles, sum_d, &cntPos, &cntNeg);
+	countSpins(redBlocks, total_length, sublattice_length, d_black_tiles, d_white_tiles, sum_d, &cntPos, &cntNeg);
 	printf("Final   magnetization: %9.6lf, up_s: %12llu, dw_s: %12llu (iter: %8d)\n\n",
-	       abs(static_cast<double>(cntPos)-static_cast<double>(cntNeg)) / (llen*SPIN_X_WORD),
+	       abs(static_cast<double>(cntPos)-static_cast<double>(cntNeg)) / (total_length*SPIN_X_WORD),
 	       cntPos, cntNeg, iteration);
 
 	CHECK_CUDA(cudaEventElapsedTime(&elapsed_time, start, stop));
 
 	printf("Kernel execution time for %d update steps: %E ms, %.2lf flips/ns (BW: %.2lf GB/s)\n",
-		iteration, elapsed_time, static_cast<double>(llen*SPIN_X_WORD) * iteration / (elapsed_time * 1.0E+6),
+		iteration, elapsed_time, static_cast<double>(total_length*SPIN_X_WORD) * iteration / (elapsed_time * 1.0E+6),
 		(2ull * iteration * (
-			  sizeof(*d_spins)*((llen / 2) + (llen / 2) + (llen / 2))  // src color read, dst color read, dst color write
+			  sizeof(*d_spins)*((total_length / 2) + (total_length / 2) + (total_length / 2))  // src color read, dst color read, dst color write
 			+ sizeof(*exp_d) * 5 * grid.x * grid.y ) * 1.0E-9) / (elapsed_time / 1.0E+3));
 
 	CHECK_CUDA(cudaFree(d_spins));
