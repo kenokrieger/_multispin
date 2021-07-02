@@ -77,7 +77,8 @@ __device__ __forceinline__ uint2 __mymake_int2(const unsigned int x, const unsig
 __device__ __forceinline__ ulonglong2 __mymake_int2(const unsigned long long x, const unsigned long long y) {return make_ulonglong2(x, y);}
 
 
-template<int BLOCK_DIMENSION_X, int BLOCK_DIMENSION_Y, int LOOP_X, int LOOP_Y, int BITXSPIN, int COLOR, typename INT_T, typename INT2_T>
+template<int BLOCK_DIMENSION_X, int BLOCK_DIMENSION_Y, int LOOP_X, int LOOP_Y, int BITXSPIN, int COLOR,
+         typename INT_T, typename INT2_T>
 __global__  void initialise_traders(const long long seed, const long long dimX, INT2_T *__restrict__ traders)
 {
 	const int row = blockIdx.y * BLOCK_DIMENSION_Y * LOOP_Y + threadIdx.y;
@@ -132,255 +133,78 @@ __global__  void initialise_traders(const long long seed, const long long dimX, 
 	for(int i = 0; i < LOOP_Y; i++) {
 		#pragma unroll
 		for(int j = 0; j < LOOP_X; j++) {
+      // copy temporary elements to their respective positions in the destination array
 			traders[(row + i * BLOCK_DIMENSION_Y) * dimX + col + j * BLOCK_DIMENSION_X] = __tmp[i][j];
 		}
 	}
 	return;
 }
 
-template<int BLOCK_DIMENSION_X,
-	 int BLOCK_DIMENSION_Y,
-	 int LOOP_X,
-	 int LOOP_Y,
-	 int BITXSPIN,
-	 typename INT_T,
-	 typename INT2_T>
-__global__  void hamiltInitB_k(const int device_id,
-			       const float tgtProb,
-			       const long long seed,
-                               const long long begY,
-                               const long long dimX, // ld
-                                     INT2_T *__restrict__ hamB) {
 
-	const int row = blockIdx.y*BLOCK_DIMENSION_Y*LOOP_Y + threadIdx.y;
-	const int col = blockIdx.x*BLOCK_DIMENSION_X*LOOP_X + threadIdx.x;
-
-	const long long thread_id = ((device_id*gridDim.y + blockIdx.y)*gridDim.x + blockIdx.x)*BLOCK_DIMENSION_X*BLOCK_DIMENSION_Y +
-	                              threadIdx.y*BLOCK_DIMENSION_X + threadIdx.x;
-
-	curandStatePhilox4_32_10_t rng;
-	curand_init(seed, thread_id, 0, &rng);
-
-	INT2_T __tmp[LOOP_Y][LOOP_X];
-	#pragma unroll
-	for(int i = 0; i < LOOP_Y; i++) {
-		#pragma unroll
-		for(int j = 0; j < LOOP_X; j++) {
-			__tmp[i][j] = __mymake_int2(INT_T(0),INT_T(0));
-		}
-	}
-
-	#pragma unroll
-	for(int i = 0; i < LOOP_Y; i++) {
-		#pragma unroll
-		for(int j = 0; j < LOOP_X; j++) {
-			#pragma unroll
-			for(int k = 0; k < 8*sizeof(INT_T); k += BITXSPIN) {
-				#pragma unroll
-				for(int l = 0; l < BITXSPIN; l++) {
-					if (curand_uniform(&rng) < tgtProb) {
-						__tmp[i][j].x |= INT_T(1) << (k+l);
-					}
-					if (curand_uniform(&rng) < tgtProb) {
-						__tmp[i][j].y |= INT_T(1) << (k+l);
-					}
-				}
-			}
-		}
-	}
-
-	#pragma unroll
-	for(int i = 0; i < LOOP_Y; i++) {
-		#pragma unroll
-		for(int j = 0; j < LOOP_X; j++) {
-			hamB[(begY + row+i*BLOCK_DIMENSION_Y)*dimX + col+j*BLOCK_DIMENSION_X] = __tmp[i][j];
-		}
-	}
-	return;
-}
-
-
-template<int BLOCK_DIMENSION_X, int BLOCK_DIMENSION_Y, int LOOP_X, int LOOP_Y, int BITXSPIN, typename INT_T, typename INT2_T>
-__global__ void hamiltInitW_k(const int xsl, const int ysl, const long long begY,
-		              					  const long long dimX,
-		              				    const INT2_T *__restrict__ hamB,
-		                    		  INT2_T *__restrict__ hamW)
+template<int BLOCK_DIMENSION_X, int BLOCK_DIMENSION_Y, int TILE_X, int TILE_Y, typename INT2_T>
+__device__ void loadTile(const int grid_width, const int grid_height, const long long begY, const long long dimX,
+                         const INT2_T *__restrict__ v, INT2_T tile[][TILE_X + 2])
 {
 	const int tidx = threadIdx.x;
 	const int tidy = threadIdx.y;
 
-	const int row = blockIdx.y*BLOCK_DIMENSION_Y*LOOP_Y + tidy;
-	const int col = blockIdx.x*BLOCK_DIMENSION_X*LOOP_X + tidx;
-
-	INT2_T __me[LOOP_Y][LOOP_X];
-
-	#pragma unroll
-	for(int i = 0; i < LOOP_Y; i++) {
-		#pragma unroll
-		for(int j = 0; j < LOOP_X; j++) {
-			__me[i][j] = hamB[(begY+row+i*BLOCK_DIMENSION_Y)*dimX + col+j*BLOCK_DIMENSION_X];
-		}
-	}
-
-	INT2_T __up[LOOP_Y][LOOP_X];
-	INT2_T __ct[LOOP_Y][LOOP_X];
-	INT2_T __dw[LOOP_Y][LOOP_X];
-	INT2_T __sd[LOOP_Y][LOOP_X];
-
-	#pragma unroll
-	for(int i = 0; i < LOOP_Y; i++) {
-		#pragma unroll
-		for(int j = 0; j < LOOP_X; j++) {
-			__up[i][j].x = (__me[i][j].x & 0x8888888888888888ull) >> 1;
-			__up[i][j].y = (__me[i][j].y & 0x8888888888888888ull) >> 1;
-
-			__dw[i][j].x = (__me[i][j].x & 0x4444444444444444ull) << 1;
-			__dw[i][j].y = (__me[i][j].y & 0x4444444444444444ull) << 1;
-		}
-	}
-
-	const int readBack = !(row%2); // this kernel reads only BLACK Js
-
-	const int BITXWORD = 8*sizeof(INT_T);
-
-	if (!readBack) {
-		#pragma unroll
-		for(int i = 0; i < LOOP_Y; i++) {
-			#pragma unroll
-			for(int j = 0; j < LOOP_X; j++) {
-
-				__ct[i][j].x = (__me[i][j].x & 0x2222222222222222ull) >> 1;
-				__ct[i][j].y = (__me[i][j].y & 0x2222222222222222ull) >> 1;
-
-				__ct[i][j].x |= (__me[i][j].x & 0x1111111111111111ull) << (BITXSPIN+1);
-				__ct[i][j].y |= (__me[i][j].x & 0x1111111111111111ull) >> (BITXWORD-BITXSPIN - 1);
-				__ct[i][j].y |= (__me[i][j].y & 0x1111111111111111ull) << (BITXSPIN+1);
-
-				__sd[i][j].x = (__me[i][j].y & 0x1111111111111111ull) >> (BITXWORD-BITXSPIN - 1);
-				__sd[i][j].y = 0;
-			}
-		}
-	} else {
-		#pragma unroll
-		for(int i = 0; i < LOOP_Y; i++) {
-			#pragma unroll
-			for(int j = 0; j < LOOP_X; j++) {
-
-				__ct[i][j].x = (__me[i][j].x & 0x1111111111111111ull) << 1;
-				__ct[i][j].y = (__me[i][j].y & 0x1111111111111111ull) << 1;
-
-				__ct[i][j].y |= (__me[i][j].y & 0x2222222222222222ull) >> (BITXSPIN+1);
-				__ct[i][j].x |= (__me[i][j].y & 0x2222222222222222ull) << (BITXWORD-BITXSPIN - 1);
-				__ct[i][j].x |= (__me[i][j].x & 0x2222222222222222ull) >> (BITXSPIN+1);
-
-				__sd[i][j].y = (__me[i][j].x & 0x2222222222222222ull) << (BITXWORD-BITXSPIN - 1);
-				__sd[i][j].x = 0;
-			}
-		}
-	}
-
-	#pragma unroll
-	for(int i = 0; i < LOOP_Y; i++) {
-
-		const int yoff = begY+row + i*BLOCK_DIMENSION_Y;
-
-		const int upOff = ( yoff   %ysl) == 0 ? yoff+ysl-1 : yoff-1;
-		const int dwOff = ((yoff+1)%ysl) == 0 ? yoff-ysl+1 : yoff+1;
-
-		#pragma unroll
-		for(int j = 0; j < LOOP_X; j++) {
-
-			const int xoff = col + j*BLOCK_DIMENSION_X;
-
-			atomicOr(&hamW[yoff*dimX + xoff].x, __ct[i][j].x);
-			atomicOr(&hamW[yoff*dimX + xoff].y, __ct[i][j].y);
-
-			atomicOr(&hamW[upOff*dimX + xoff].x, __up[i][j].x);
-			atomicOr(&hamW[upOff*dimX + xoff].y, __up[i][j].y);
-
-			atomicOr(&hamW[dwOff*dimX + xoff].x, __dw[i][j].x);
-			atomicOr(&hamW[dwOff*dimX + xoff].y, __dw[i][j].y);
-
-			const int sideOff = readBack ? (  (xoff   %xsl) == 0 ? xoff+xsl-1 : xoff-1 ):
-						       ( ((xoff+1)%xsl) == 0 ? xoff-xsl+1 : xoff+1);
-
-			atomicOr(&hamW[yoff*dimX + sideOff].x, __sd[i][j].x);
-			atomicOr(&hamW[yoff*dimX + sideOff].y, __sd[i][j].y);
-		}
-	}
-	return;
-}
-
-
-template<int BLOCK_DIMENSION_X, int BLOCK_DIMENSION_Y, int TILE_X, int TILE_Y, int FRAME_X, int FRAME_Y, typename INT2_T>
-__device__ void loadTile(const int slX, const int slY, const long long begY,
-			 									 const long long dimX,
-			 								 	 const INT2_T *__restrict__ v,
-			       		 				 INT2_T tile[][TILE_X+2*FRAME_X])
-{
-	const int blkx = blockIdx.x;
-	const int blky = blockIdx.y;
-
-	const int tidx = threadIdx.x;
-	const int tidy = threadIdx.y;
-
-	const int startX =        blkx*TILE_X;
-	const int startY = begY + blky*TILE_Y;
+	const int startX =        blockIdx.x * TILE_X;
+	const int startY = begY + blockIdx.y * TILE_Y;
 
 	#pragma unroll
 	for(int j = 0; j < TILE_Y; j += BLOCK_DIMENSION_Y) {
-		int yoff = startY + j+tidy;
+		int yoff = startY + j + tidy;
 
 		#pragma unroll
 		for(int i = 0; i < TILE_X; i += BLOCK_DIMENSION_X) {
-			const int xoff = startX + i+tidx;
-			tile[FRAME_Y + j+tidy][FRAME_X + i+tidx] = v[yoff*dimX + xoff];
+			const int xoff = startX + i + tidx;
+			tile[1 + j + tidy][1 + i + tidx] = v[yoff * dimX + xoff];
 		}
 	}
 	if (tidy == 0) {
-		int yoff = (startY % slY) == 0 ? startY+slY-1 : startY-1;
+		int yoff = (startY % grid_height) == 0 ? startY + grid_height-1 : startY - 1;
 
 		#pragma unroll
 		for(int i = 0; i < TILE_X; i += BLOCK_DIMENSION_X) {
-			const int xoff = startX + i+tidx;
-			tile[0][FRAME_X + i+tidx] = v[yoff*dimX + xoff];
+			const int xoff = startX + i + tidx;
+			tile[0][1 + i + tidx] = v[yoff * dimX + xoff];
 		}
 
-		yoff = ((startY+TILE_Y) % slY) == 0 ? startY+TILE_Y - slY : startY+TILE_Y;
+		yoff = ((startY + TILE_Y) % grid_height) == 0 ? startY + TILE_Y - grid_height : startY + TILE_Y;
 
 		#pragma unroll
 		for(int i = 0; i < TILE_X; i += BLOCK_DIMENSION_X) {
-			const int xoff = startX + i+tidx;
-			tile[FRAME_Y + TILE_Y][FRAME_X + i+tidx] = v[yoff*dimX + xoff];
+			const int xoff = startX + i + tidx;
+			tile[1 + TILE_Y][1 + i + tidx] = v[yoff * dimX + xoff];
 		}
 
 		// the other branch in slower so skip it if possible
 		if (BLOCK_DIMENSION_X <= TILE_Y) {
 
-			int xoff = (startX % slX) == 0 ? startX+slX-1 : startX-1;
+			int xoff = (startX % grid_width) == 0 ? startX + grid_width - 1 : startX - 1;
 
 			#pragma unroll
 			for(int j = 0; j < TILE_Y; j += BLOCK_DIMENSION_X) {
-				yoff = startY + j+tidx;
-				tile[FRAME_Y + j+tidx][0] = v[yoff*dimX + xoff];
+				yoff = startY + j + tidx;
+				tile[1 + j + tidx][0] = v[yoff * dimX + xoff];
 			}
 
-			xoff = ((startX+TILE_X) % slX) == 0 ? startX+TILE_X - slX : startX+TILE_X;
+			xoff = ((startX + TILE_X) % grid_width) == 0 ? startX + TILE_X - grid_width : startX + TILE_X;
 
 			#pragma unroll
 			for(int j = 0; j < TILE_Y; j += BLOCK_DIMENSION_X) {
-				yoff = startY + j+tidx;
-				tile[FRAME_Y + j+tidx][FRAME_X + TILE_X] = v[yoff*dimX + xoff];
+				yoff = startY + j + tidx;
+				tile[1 + j + tidx][1 + TILE_X] = v[yoff * dimX + xoff];
 			}
 		} else {
 			if (tidx < TILE_Y) {
-				int xoff = (startX % slX) == 0 ? startX+slX-1 : startX-1;
+				int xoff = (startX % grid_width) == 0 ? startX + grid_width-1 : startX - 1;
 
 				yoff = startY + tidx;
-				tile[FRAME_Y + tidx][0] = v[yoff*dimX + xoff];;
+				tile[1 + tidx][0] = v[yoff * dimX + xoff];;
 
-				xoff = ((startX+TILE_X) % slX) == 0 ? startX+TILE_X - slX : startX+TILE_X;
-				tile[FRAME_Y + tidx][FRAME_X + TILE_X] = v[yoff*dimX + xoff];
+				xoff = ((startX + TILE_X) % grid_width) == 0 ? startX + TILE_X - grid_width : startX + TILE_X;
+				tile[1 + tidx][1 + TILE_X] = v[yoff * dimX + xoff];
 			}
 		}
 	}
@@ -389,13 +213,11 @@ __device__ void loadTile(const int slX, const int slY, const long long begY,
 
 
 template<int BLOCK_DIMENSION_X, int BLOCK_DIMENSION_Y, int LOOP_X, int LOOP_Y, int BITXSPIN, int COLOR, typename INT_T, typename INT2_T>
-__global__ void spinUpdateV_2D_k(const int device_id, const long long seed, const int it,
-		      const int slX, // sublattice size grid_width of one color (in words)
-		      const int slY, // sublattice size grid_height of one color
-		      const long long begY,
-		      const long long dimX, // ld
+__global__ void spinUpdateV_2D_k(const long long seed, const int it,
+		      const int grid_width, // lattice width of one color in words
+		      const int grid_height, // lattice height (not in words)
+		      const long long begY, const long long dimX,
 		      const float vExp[][5],
-		      const INT2_T *__restrict__ jDst,
 		      const INT2_T *__restrict__ vSrc,
 		            INT2_T *__restrict__ vDst)
 {
@@ -404,12 +226,10 @@ __global__ void spinUpdateV_2D_k(const int device_id, const long long seed, cons
 	const int tidx = threadIdx.x;
 	const int tidy = threadIdx.y;
 
-	__shared__ INT2_T shTile[BLOCK_DIMENSION_Y*LOOP_Y+2][BLOCK_DIMENSION_X*LOOP_X+2];
+	__shared__ INT2_T shared_tile[BLOCK_DIMENSION_Y * LOOP_Y+2][BLOCK_DIMENSION_X * LOOP_X+2];
 
-	loadTile<BLOCK_DIMENSION_X, BLOCK_DIMENSION_Y,
-		 BLOCK_DIMENSION_X * LOOP_X,
-		 BLOCK_DIMENSION_Y * LOOP_Y,
-		 1, 1, INT2_T>(slX, slY, begY, dimX, vSrc, shTile);
+	loadTile<BLOCK_DIMENSION_X, BLOCK_DIMENSION_Y, BLOCK_DIMENSION_X * LOOP_X, BLOCK_DIMENSION_Y * LOOP_Y, INT2_T>
+  (grid_width, grid_height, begY, dimX, vSrc, shared_tile);
 
 	__shared__ float __shExp[2][5];
 
@@ -427,7 +247,7 @@ __global__ void spinUpdateV_2D_k(const int device_id, const long long seed, cons
 	const int row = blockIdx.y*BLOCK_DIMENSION_Y*LOOP_Y + tidy;
 	const int col = blockIdx.x*BLOCK_DIMENSION_X*LOOP_X + tidx;
 
-	const long long thread_id = ((device_id*gridDim.y + blockIdx.y)*gridDim.x + blockIdx.x)*BLOCK_DIMENSION_X*BLOCK_DIMENSION_Y +
+	const long long thread_id = (blockIdx.y * gridDim.x + blockIdx.x)*BLOCK_DIMENSION_X*BLOCK_DIMENSION_Y +
 	                       threadIdx.y*BLOCK_DIMENSION_X + threadIdx.x;
 
 	INT2_T __me[LOOP_Y][LOOP_X];
@@ -448,9 +268,9 @@ __global__ void spinUpdateV_2D_k(const int device_id, const long long seed, cons
 	for(int i = 0; i < LOOP_Y; i++) {
 		#pragma unroll
 		for(int j = 0; j < LOOP_X; j++) {
-			__up[i][j] = shTile[i*BLOCK_DIMENSION_Y +   tidy][j*BLOCK_DIMENSION_X + 1+tidx];
-			__ct[i][j] = shTile[i*BLOCK_DIMENSION_Y + 1+tidy][j*BLOCK_DIMENSION_X + 1+tidx];
-			__dw[i][j] = shTile[i*BLOCK_DIMENSION_Y + 2+tidy][j*BLOCK_DIMENSION_X + 1+tidx];
+			__up[i][j] = shared_tile[i * BLOCK_DIMENSION_Y +   tidy][j * BLOCK_DIMENSION_X + 1 + tidx];
+			__ct[i][j] = shared_tile[i * BLOCK_DIMENSION_Y + 1 + tidy][j * BLOCK_DIMENSION_X + 1 + tidx];
+			__dw[i][j] = shared_tile[i *  BLOCK_DIMENSION_Y + 2 + tidy][j * BLOCK_DIMENSION_X + 1 + tidx];
 		}
 	}
 
@@ -463,8 +283,8 @@ __global__ void spinUpdateV_2D_k(const int device_id, const long long seed, cons
 	for(int i = 0; i < LOOP_Y; i++) {
 		#pragma unroll
 		for(int j = 0; j < LOOP_X; j++) {
-			__sd[i][j] = (readBack) ? shTile[i*BLOCK_DIMENSION_Y + 1+tidy][j*BLOCK_DIMENSION_X +   tidx]:
-						  shTile[i*BLOCK_DIMENSION_Y + 1+tidy][j*BLOCK_DIMENSION_X + 2+tidx];
+			__sd[i][j] = (readBack) ? shared_tile[i*BLOCK_DIMENSION_Y + 1+tidy][j*BLOCK_DIMENSION_X +   tidx]:
+						  shared_tile[i*BLOCK_DIMENSION_Y + 1+tidy][j*BLOCK_DIMENSION_X + 2+tidx];
 		}
 	}
 
@@ -484,51 +304,6 @@ __global__ void spinUpdateV_2D_k(const int device_id, const long long seed, cons
 			for(int j = 0; j < LOOP_X; j++) {
 				__sd[i][j].y = (__ct[i][j].y >> BITXSPIN) | (__sd[i][j].x << (8*sizeof(__sd[i][j].x)-BITXSPIN));
 				__sd[i][j].x = (__ct[i][j].x >> BITXSPIN) | (__ct[i][j].y << (8*sizeof(__ct[i][j].y)-BITXSPIN));
-			}
-		}
-	}
-
-	if (jDst != NULL) {
-		INT2_T __J[LOOP_Y][LOOP_X];
-
-		#pragma unroll
-		for(int i = 0; i < LOOP_Y; i++) {
-			#pragma unroll
-			for(int j = 0; j < LOOP_X; j++) {
-				__J[i][j] = jDst[(begY+row+i*BLOCK_DIMENSION_Y)*dimX + col+j*BLOCK_DIMENSION_X];
-			}
-		}
-
-		// apply them
-		// the 4 bits of J codify: <upJ, downJ, leftJ, rightJ>
-		#pragma unroll
-		for(int i = 0; i < LOOP_Y; i++) {
-			#pragma unroll
-			for(int j = 0; j < LOOP_X; j++) {
-
-				__up[i][j].x ^= (__J[i][j].x & 0x8888888888888888ull) >> 3;
-				__up[i][j].y ^= (__J[i][j].y & 0x8888888888888888ull) >> 3;
-
-				__dw[i][j].x ^= (__J[i][j].x & 0x4444444444444444ull) >> 2;
-				__dw[i][j].y ^= (__J[i][j].y & 0x4444444444444444ull) >> 2;
-
-				if (readBack) {
-					// __sd[][] holds "left" spins
-					// __ct[][] holds "right" spins
-					__sd[i][j].x ^= (__J[i][j].x & 0x2222222222222222ull) >> 1;
-					__sd[i][j].y ^= (__J[i][j].y & 0x2222222222222222ull) >> 1;
-
-					__ct[i][j].x ^= (__J[i][j].x & 0x1111111111111111ull);
-					__ct[i][j].y ^= (__J[i][j].y & 0x1111111111111111ull);
-				} else {
-					// __ct[][] holds "left" spins
-					// __sd[][] holds "right" spins
-					__ct[i][j].x ^= (__J[i][j].x & 0x2222222222222222ull) >> 1;
-					__ct[i][j].y ^= (__J[i][j].y & 0x2222222222222222ull) >> 1;
-
-					__sd[i][j].x ^= (__J[i][j].x & 0x1111111111111111ull);
-					__sd[i][j].y ^= (__J[i][j].y & 0x1111111111111111ull);
-				}
 			}
 		}
 	}
@@ -673,219 +448,11 @@ static void countSpins(const int redBlocks,
 }
 
 
-template<int BLOCK_DIMENSION_X,
-	 int BITXSPIN,
-	 int N_CORR,
-   typename INT_T,
-	 typename SUM_T>
-__global__ void getCorr2D_k(const int corrLen,
-												    const long long dimX,
-												    const long long dimY,
-												    const long long begY,
-												    const INT_T *__restrict__ black,
-												    const INT_T *__restrict__ white,
-													  SUM_T *__restrict__ corr)
-{
-	const int SPIN_X_WORD = 8*sizeof(INT_T)/BITXSPIN;
-
-	const int thread_id = threadIdx.x;
-
-	const long long startY = begY + blockIdx.x;
-
-	const int SH_LEN = BLOCK_DIMENSION_X + DIV_UP(N_CORR/2, SPIN_X_WORD);
-
-	__shared__ INT_T __shB[SH_LEN];
-	__shared__ INT_T __shW[SH_LEN];
-	__shared__ SUM_T __shC[N_CORR];
-
-	#pragma unroll
-	for(int j = 0; j < N_CORR; j += BLOCK_DIMENSION_X) {
-		if (j+thread_id < N_CORR) {
-			__shC[j+thread_id] = 0;
-		}
-	}
-
-	const int chunkDimX = 2*BLOCK_DIMENSION_X*SPIN_X_WORD;
-
-	for(long long l = 0; l < dimX; l += BLOCK_DIMENSION_X) {
-
-		__syncthreads();
-		#pragma unroll
-		for(int j = 0; j < SH_LEN; j += BLOCK_DIMENSION_X) {
-			if (j+thread_id < SH_LEN) {
-				const int off = (l+j+thread_id < dimX) ? l+j+thread_id : l+j+thread_id - dimX;
-				__shB[j+thread_id] = black[startY*dimX + off];
-				__shW[j+thread_id] = white[startY*dimX + off];
-			}
-		}
-		__syncthreads();
-
-		for(int j = 1; j <= corrLen; j++) {
-
-			SUM_T myCorr = 0;
-
-			for(long long i = thread_id; i < chunkDimX; i += BLOCK_DIMENSION_X) {
-
-				// horiz corr
-				const long long myWrdX = (i/2) / SPIN_X_WORD;
-				const long long myOffX = (i/2) % SPIN_X_WORD;
-
-				INT_T __tmp = ((startY ^ i) & 1) ? __shW[myWrdX] : __shB[myWrdX];
-				const int mySpin = (__tmp >> (myOffX*BITXSPIN)) & 0xF;
-
-				const long long nextX = i+j;
-
-				const long long nextWrdX = (nextX/2) / SPIN_X_WORD;
-				const long long nextOffX = (nextX/2) % SPIN_X_WORD;
-
-				__tmp = ((startY ^ nextX) & 1) ? __shW[nextWrdX] : __shB[nextWrdX];
-				const int nextSpin = (__tmp >> (nextOffX*BITXSPIN)) & 0xF;
-
-				myCorr += (mySpin == nextSpin) ? SUM_T(1) : SUM_T(-1);
-
-				// vert corr
-				const long long nextY = (startY+j >= dimY) ? startY+j-dimY : startY+j;
-
-				__tmp = ((nextY ^ i) & 1) ? white[nextY*dimX + l+myWrdX]:
-							    black[nextY*dimX + l+myWrdX];
-				const int vertSpin = (__tmp >> (myOffX*BITXSPIN)) & 0xF;
-
-				myCorr += (mySpin == vertSpin) ? SUM_T(1) : SUM_T(-1);
-			}
-
-			myCorr = __block_sum<BLOCK_DIMENSION_X, 32>(myCorr);
-			if (!thread_id) {
-				__shC[j-1] += myCorr;
-			}
-		}
-	}
-	__syncthreads();
-
-	#pragma unroll
-	for(int j = 0; j < N_CORR; j += BLOCK_DIMENSION_X) {
-		if (j+thread_id < N_CORR) {
-			atomicAdd(corr + j+thread_id, __shC[j+thread_id]);
-		}
-	}
-	return;
-}
-
-
-template<int BLOCK_DIMENSION_X,
-	 int BITXSPIN,
-	 int N_CORR,
-   typename INT_T,
-	 typename SUM_T>
-__global__ void getCorr2DRepl_k(const int corrLen,
-																const long long dimX,
-																const long long begY,
-															  const long long slX, // sublattice size grid_width of one color (in words)
-															  const long long slY, // sublattice size grid_height of one color
-																const INT_T *__restrict__ black,
-																const INT_T *__restrict__ white,
-																      SUM_T *__restrict__ corr)
-{
-	const int thread_id = threadIdx.x;
-	const int SPIN_X_WORD = 8*sizeof(INT_T)/BITXSPIN;
-
-	const long long startY = begY + blockIdx.x;
-	const long long mySLY = startY / slY;
-
-	const long long NSLX = 2ull*dimX*SPIN_X_WORD / slX;
-
-	const int SH_LEN = BLOCK_DIMENSION_X + DIV_UP(N_CORR/2, SPIN_X_WORD);
-
-	__shared__ INT_T __shB[SH_LEN];
-	__shared__ INT_T __shW[SH_LEN];
-
-	__shared__ SUM_T __shC[N_CORR];
-
-	#pragma unroll
-	for(int j = 0; j < N_CORR; j += BLOCK_DIMENSION_X) {
-		if (j+thread_id < N_CORR) {
-			__shC[j+thread_id] = 0;
-		}
-	}
-
-	const int chunkDimX = MIN(2*BLOCK_DIMENSION_X*SPIN_X_WORD, slX);
-
-	const int slXLD = (slX/2) / SPIN_X_WORD;
-
-	for(long long sl = 0; sl < NSLX; sl++) {
-
-		for(long long l = 0; l < slXLD; l += BLOCK_DIMENSION_X) {
-
-			__syncthreads();
-			#pragma unroll
-			for(int j = 0; j < SH_LEN; j += BLOCK_DIMENSION_X) {
-				if (j+thread_id < SH_LEN) {
-					const int off = (l+j+thread_id) % slXLD;
-					__shB[j+thread_id] = black[startY*dimX + sl*slXLD + off];
-					__shW[j+thread_id] = white[startY*dimX + sl*slXLD + off];
-				}
-			}
-			__syncthreads();
-
-			for(int j = 1; j <= corrLen; j++) {
-
-				SUM_T myCorr = 0;
-
-				for(long long i = thread_id; i < chunkDimX; i += BLOCK_DIMENSION_X) {
-
-					// horiz corr
-					const long long myWrdX = (i/2) / SPIN_X_WORD;
-					const long long myOffX = (i/2) % SPIN_X_WORD;
-
-					INT_T __tmp = ((startY ^ i) & 1) ? __shW[myWrdX] : __shB[myWrdX];
-					const int mySpin = (__tmp >> (myOffX*BITXSPIN)) & 0xF;
-
-					const long long nextX = i+j;
-
-					const long long nextWrdX = (nextX/2) / SPIN_X_WORD;
-					const long long nextOffX = (nextX/2) % SPIN_X_WORD;
-
-					__tmp = ((startY ^ nextX) & 1) ? __shW[nextWrdX] : __shB[nextWrdX];
-					const int nextSpin = (__tmp >> (nextOffX*BITXSPIN)) & 0xF;
-
-					myCorr += (mySpin == nextSpin) ? SUM_T(1) : SUM_T(-1);
-
-					// vert corr
-					const long long nextY = (startY+j >= (mySLY+1)*slY) ? startY+j-slY : startY+j;
-
-					__tmp = ((nextY ^ i) & 1) ? white[nextY*dimX + sl*slXLD + l+myWrdX]:
-								    black[nextY*dimX + sl*slXLD + l+myWrdX];
-					const int vertSpin = (__tmp >> (myOffX*BITXSPIN)) & 0xF;
-
-					myCorr += (mySpin == vertSpin) ? SUM_T(1) : SUM_T(-1);
-				}
-
-				myCorr = __block_sum<BLOCK_DIMENSION_X, 32>(myCorr);
-				if (!thread_id) {
-					__shC[j-1] += myCorr;
-				}
-			}
-		}
-	}
-	__syncthreads();
-
-	#pragma unroll
-	for(int j = 0; j < N_CORR; j += BLOCK_DIMENSION_X) {
-		if (j+thread_id < N_CORR) {
-			atomicAdd(corr + j+thread_id, __shC[j+thread_id]);
-		}
-	}
-	return;
-}
-
-
 int main(int argc, char **argv) {
 
-	unsigned long long *d_spins=NULL;
-	unsigned long long *d_black_tiles=NULL;
-	unsigned long long *d_white_tiles=NULL;
-
-	unsigned long long *hamB_d=NULL;
-	unsigned long long *hamW_d=NULL;
+	unsigned long long *d_spins = NULL;
+	unsigned long long *d_black_tiles = NULL;
+	unsigned long long *d_white_tiles = NULL;
 
 	cudaEvent_t start, stop;
   float elapsed_time;
@@ -901,10 +468,10 @@ int main(int argc, char **argv) {
 
 	float temp  = 0.666f;
 
-	int XSL = 0;
-	int YSL = 0;
+	int XSL = grid_width;
+	int YSL = grid_height;
 
-	if (!grid_width || (grid_width % 2) || ((grid_width / 2) % (SPIN_X_WORD*2*BLOCK_DIMENSION_X_DEFINE*BMULT_X))) {
+	if (!grid_width || (grid_width % 2) || ((grid_width / 2) % (SPIN_X_WORD * 2 * BLOCK_DIMENSION_X_DEFINE * BMULT_X))) {
 		fprintf(stderr, "\nPlease specify an grid_width dim multiple of %d\n\n", 2 * SPIN_X_WORD * 2 * BLOCK_DIMENSION_X_DEFINE * BMULT_X);
 		exit(EXIT_FAILURE);
 	}
@@ -913,12 +480,9 @@ int main(int argc, char **argv) {
 		exit(EXIT_FAILURE);
 	}
 
-	XSL = grid_width;
-	YSL = grid_height;
-
 	cudaDeviceProp props;
 
-	printf("\nUsing GPUs:\n");
+	printf("\nUsing GPU:\n");
 
 	CHECK_CUDA(cudaGetDeviceProperties(&props, 0));
 	printf("\t%2d (%s, %d SMs, %d th/SM max, CC %d.%d, ECC %s)\n",
@@ -1025,18 +589,16 @@ int main(int argc, char **argv) {
 		CHECK_CUDA(cudaSetDevice(0));
 		spinUpdateV_2D_k<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BMULT_X, BMULT_Y, BIT_X_SPIN, C_BLACK, unsigned long long>
 		<<<grid, block>>>
-		(0, seed, iteration + 1, (XSL / 2) / SPIN_X_WORD / 2, YSL, 0, words_per_row / 2,
+		(seed, iteration + 1, (XSL / 2) / SPIN_X_WORD / 2, YSL, 0, words_per_row / 2,
 		 reinterpret_cast<float (*)[5]>(exp_d[0]),
-		 reinterpret_cast<ulonglong2 *>(hamW_d),
 		 reinterpret_cast<ulonglong2 *>(d_white_tiles),
 		 reinterpret_cast<ulonglong2 *>(d_black_tiles));
 
 		CHECK_CUDA(cudaSetDevice(0));
 		spinUpdateV_2D_k<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BMULT_X, BMULT_Y, BIT_X_SPIN, C_WHITE, unsigned long long>
 		<<<grid, block>>>
-		(0, seed, iteration + 1, (XSL / 2) / SPIN_X_WORD / 2, YSL, 0, words_per_row / 2,
+		(seed, iteration + 1, (XSL / 2) / SPIN_X_WORD / 2, YSL, 0, words_per_row / 2,
 		 reinterpret_cast<float (*)[5]>(exp_d[0]),
-		 reinterpret_cast<ulonglong2 *>(hamB_d),
 		 reinterpret_cast<ulonglong2 *>(d_black_tiles),
 		 reinterpret_cast<ulonglong2 *>(d_white_tiles));
 	}
