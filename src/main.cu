@@ -23,12 +23,6 @@
  */
 
 #include <stdio.h>
-#include <stdlib.h>
-#include <math.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <getopt.h>
-#include <unistd.h>
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 #include "cudamacro.h" /* for time() */
@@ -58,12 +52,9 @@
 #define BMULT_X (2)
 #define BMULT_Y (1)
 
-#define MAX_GPU	(256)
-
 #define TOTAL_UPDATES_DEFAULT (10000)
 #define SEED_DEFAULT  (463463564571ull)
 
-#define MAX_CORR_LEN (128)
 
 __device__ __forceinline__ unsigned int __mypopc(const unsigned int x) {return __popc(x);}
 
@@ -79,7 +70,7 @@ __device__ __forceinline__ ulonglong2 __mymake_int2(const unsigned long long x, 
 
 template<int BLOCK_DIMENSION_X, int BLOCK_DIMENSION_Y, int LOOP_X, int LOOP_Y, int BITXSPIN, int COLOR,
          typename INT_T, typename INT2_T>
-__global__  void initialise_traders(const long long seed, const long long dimX, INT2_T *__restrict__ traders)
+__global__  void initialise_traders(const long long seed, const long long number_of_columns, INT2_T *__restrict__ traders)
 {
 	const int row = blockIdx.y * BLOCK_DIMENSION_Y * LOOP_Y + threadIdx.y;
 	const int col = blockIdx.x * BLOCK_DIMENSION_X * LOOP_X + threadIdx.x;
@@ -112,8 +103,9 @@ __global__  void initialise_traders(const long long seed, const long long dimX, 
 				// returns a different number on each invokation
 				if (curand_uniform(&rng) < 0.5f) {
           /*
-           * shift the spin 1 to its respective position and then assign the
-           * matching bit the value 1 by using the bitwise logical or |=
+           * shift the spin with value 1 to its respective position and then
+           * assign the matching bit the value 1 by using the bitwise
+           * logical or operator |=
            * shift: 0000000000000000001 -> 0000000000010000000
            * logical bitwise or with tmp:
            * tmp[i][j] =                0000000000000001000
@@ -134,77 +126,80 @@ __global__  void initialise_traders(const long long seed, const long long dimX, 
 		#pragma unroll
 		for(int j = 0; j < LOOP_X; j++) {
       // copy temporary elements to their respective positions in the destination array
-			traders[(row + i * BLOCK_DIMENSION_Y) * dimX + col + j * BLOCK_DIMENSION_X] = __tmp[i][j];
+			traders[(row + i * BLOCK_DIMENSION_Y) * number_of_columns + col + j * BLOCK_DIMENSION_X] = __tmp[i][j];
 		}
 	}
 	return;
 }
 
 
-template<int BLOCK_DIMENSION_X, int BLOCK_DIMENSION_Y, int TILE_X, int TILE_Y, typename INT2_T>
-__device__ void loadTile(const int grid_width, const int grid_height, const long long begY, const long long dimX,
-                         const INT2_T *__restrict__ v, INT2_T tile[][TILE_X + 2])
+template<int BLOCK_DIMENSION_X, int BLOCK_DIMENSION_Y, int TILE_SIZE_X, int TILE_SIZE_Y, typename INT2_T>
+__device__ void load_tiles(const int grid_width, const int grid_height, const long long number_of_columns,
+                           const INT2_T *__restrict__ traders, INT2_T tile[][TILE_SIZE_X + 2])
+    /*
+    Each block works on one tile with shape (TILE_SIZE_X, TILE_SIZE_Y).
+    */
 {
 	const int tidx = threadIdx.x;
 	const int tidy = threadIdx.y;
 
-	const int startX =        blockIdx.x * TILE_X;
-	const int startY = begY + blockIdx.y * TILE_Y;
+	const int tile_start_x = blockIdx.x * TILE_SIZE_X;
+	const int tile_start_y = blockIdx.y * TILE_SIZE_Y;
 
 	#pragma unroll
-	for(int j = 0; j < TILE_Y; j += BLOCK_DIMENSION_Y) {
-		int yoff = startY + j + tidy;
+	for(int tile_row = 0; tile_row < TILE_SIZE_Y; tile_row += BLOCK_DIMENSION_Y) {
+		int row_in_source = tile_start_y + tile_row + tidy;
 
 		#pragma unroll
-		for(int i = 0; i < TILE_X; i += BLOCK_DIMENSION_X) {
-			const int xoff = startX + i + tidx;
-			tile[1 + j + tidy][1 + i + tidx] = v[yoff * dimX + xoff];
+		for(int tile_col = 0; tile_col < TILE_SIZE_X; tile_col += BLOCK_DIMENSION_X) {
+			const int column_in_source = tile_start_x + tile_col + tidx;
+			tile[1 + tile_row + tidy][1 + tile_col + tidx] = traders[row_in_source * number_of_columns + column_in_source];
 		}
 	}
 	if (tidy == 0) {
-		int yoff = (startY % grid_height) == 0 ? startY + grid_height-1 : startY - 1;
+		int row_in_source = (tile_start_y % grid_height) == 0 ? tile_start_y + grid_height - 1 : tile_start_y - 1;
 
 		#pragma unroll
-		for(int i = 0; i < TILE_X; i += BLOCK_DIMENSION_X) {
-			const int xoff = startX + i + tidx;
-			tile[0][1 + i + tidx] = v[yoff * dimX + xoff];
+		for(int tile_col = 0; tile_col < TILE_SIZE_X; tile_col += BLOCK_DIMENSION_X) {
+			const int column_in_source = tile_start_x + tile_col + tidx;
+			tile[0][1 + tile_col + tidx] = traders[row_in_source * number_of_columns + column_in_source];
 		}
 
-		yoff = ((startY + TILE_Y) % grid_height) == 0 ? startY + TILE_Y - grid_height : startY + TILE_Y;
+		row_in_source = ((tile_start_y + TILE_SIZE_Y) % grid_height) == 0 ? tile_start_y + TILE_SIZE_Y - grid_height : tile_start_y + TILE_SIZE_Y;
 
 		#pragma unroll
-		for(int i = 0; i < TILE_X; i += BLOCK_DIMENSION_X) {
-			const int xoff = startX + i + tidx;
-			tile[1 + TILE_Y][1 + i + tidx] = v[yoff * dimX + xoff];
+		for(int i = 0; i < TILE_SIZE_X; i += BLOCK_DIMENSION_X) {
+			const int column_in_source = tile_start_x + i + tidx;
+			tile[1 + TILE_SIZE_Y][1 + i + tidx] = traders[row_in_source * number_of_columns + column_in_source];
 		}
 
 		// the other branch in slower so skip it if possible
-		if (BLOCK_DIMENSION_X <= TILE_Y) {
+		if (BLOCK_DIMENSION_X <= TILE_SIZE_Y) {
 
-			int xoff = (startX % grid_width) == 0 ? startX + grid_width - 1 : startX - 1;
+			int column_in_source = (tile_start_x % grid_width) == 0 ? tile_start_x + grid_width - 1 : tile_start_x - 1;
 
 			#pragma unroll
-			for(int j = 0; j < TILE_Y; j += BLOCK_DIMENSION_X) {
-				yoff = startY + j + tidx;
-				tile[1 + j + tidx][0] = v[yoff * dimX + xoff];
+			for(int j = 0; j < TILE_SIZE_Y; j += BLOCK_DIMENSION_X) {
+				row_in_source = tile_start_y + j + tidx;
+				tile[1 + j + tidx][0] = traders[row_in_source * number_of_columns + column_in_source];
 			}
 
-			xoff = ((startX + TILE_X) % grid_width) == 0 ? startX + TILE_X - grid_width : startX + TILE_X;
+			column_in_source = ((tile_start_x + TILE_SIZE_X) % grid_width) == 0 ? tile_start_x + TILE_SIZE_X - grid_width : tile_start_x + TILE_SIZE_X;
 
 			#pragma unroll
-			for(int j = 0; j < TILE_Y; j += BLOCK_DIMENSION_X) {
-				yoff = startY + j + tidx;
-				tile[1 + j + tidx][1 + TILE_X] = v[yoff * dimX + xoff];
+			for(int j = 0; j < TILE_SIZE_Y; j += BLOCK_DIMENSION_X) {
+				row_in_source = tile_start_y + j + tidx;
+				tile[1 + j + tidx][1 + TILE_SIZE_X] = traders[row_in_source * number_of_columns + column_in_source];
 			}
 		} else {
-			if (tidx < TILE_Y) {
-				int xoff = (startX % grid_width) == 0 ? startX + grid_width-1 : startX - 1;
+			if (tidx < TILE_SIZE_Y) {
+				int column_in_source = (tile_start_x % grid_width) == 0 ? tile_start_x + grid_width-1 : tile_start_x - 1;
 
-				yoff = startY + tidx;
-				tile[1 + tidx][0] = v[yoff * dimX + xoff];;
+				row_in_source = tile_start_y + tidx;
+				tile[1 + tidx][0] = traders[row_in_source * number_of_columns + column_in_source];;
 
-				xoff = ((startX + TILE_X) % grid_width) == 0 ? startX + TILE_X - grid_width : startX + TILE_X;
-				tile[1 + tidx][1 + TILE_X] = v[yoff * dimX + xoff];
+				column_in_source = ((tile_start_x + TILE_SIZE_X) % grid_width) == 0 ? tile_start_x + TILE_SIZE_X - grid_width : tile_start_x + TILE_SIZE_X;
+				tile[1 + tidx][1 + TILE_SIZE_X] = traders[row_in_source * number_of_columns + column_in_source];
 			}
 		}
 	}
@@ -213,42 +208,45 @@ __device__ void loadTile(const int grid_width, const int grid_height, const long
 
 
 template<int BLOCK_DIMENSION_X, int BLOCK_DIMENSION_Y, int LOOP_X, int LOOP_Y, int BITXSPIN, int COLOR, typename INT_T, typename INT2_T>
-__global__ void spinUpdateV_2D_k(const long long seed, const int it,
+__global__ void update_strategies(const long long seed, const int number_of_previous_iterations,
 		      const int grid_width, // lattice width of one color in words
 		      const int grid_height, // lattice height (not in words)
-		      const long long begY, const long long dimX,
+		      const long long number_of_columns,
 		      const float vExp[][5],
-		      const INT2_T *__restrict__ vSrc,
-		            INT2_T *__restrict__ vDst)
+		      const INT2_T *__restrict__ traders,
+		            INT2_T *__restrict__ checkerboard_agents)
 {
-	const int SPIN_X_WORD = 8*sizeof(INT_T)/BITXSPIN;
+	const int SPIN_X_WORD = 8 * sizeof(INT_T) / BITXSPIN;
 
 	const int tidx = threadIdx.x;
 	const int tidy = threadIdx.y;
 
-	__shared__ INT2_T shared_tile[BLOCK_DIMENSION_Y * LOOP_Y+2][BLOCK_DIMENSION_X * LOOP_X+2];
+	__shared__ INT2_T shared_tiles[BLOCK_DIMENSION_Y * LOOP_Y + 2][BLOCK_DIMENSION_X * LOOP_X + 2];
 
-	loadTile<BLOCK_DIMENSION_X, BLOCK_DIMENSION_Y, BLOCK_DIMENSION_X * LOOP_X, BLOCK_DIMENSION_Y * LOOP_Y, INT2_T>
-  (grid_width, grid_height, begY, dimX, vSrc, shared_tile);
+	load_tiles<BLOCK_DIMENSION_X, BLOCK_DIMENSION_Y, BLOCK_DIMENSION_X * LOOP_X, BLOCK_DIMENSION_Y * LOOP_Y, INT2_T>
+  (grid_width, grid_height, number_of_columns, traders, shared_tiles);
 
 	__shared__ float __shExp[2][5];
 
+  // load precomputed exponentials into shared memory
+  // in case a block consists of less than 2 * 5 threads iterate over the
+  // precomputed array in each thread
 	#pragma unroll
 	for(int i = 0; i < 2; i += BLOCK_DIMENSION_Y) {
 		#pragma unroll
 		for(int j = 0; j < 5; j += BLOCK_DIMENSION_X) {
-			if (i+tidy < 2 && j+tidx < 5) {
-				__shExp[i+tidy][j+tidx] = vExp[i+tidy][j+tidx];
+			if (i + tidy < 2 && j + tidx < 5) {
+				__shExp[i + tidy][j + tidx] = vExp[i + tidy][j + tidx];
 			}
 		}
 	}
 	__syncthreads();
 
-	const int row = blockIdx.y*BLOCK_DIMENSION_Y*LOOP_Y + tidy;
-	const int col = blockIdx.x*BLOCK_DIMENSION_X*LOOP_X + tidx;
+	const int row = blockIdx.y * BLOCK_DIMENSION_Y * LOOP_Y + tidy;
+	const int col = blockIdx.x * BLOCK_DIMENSION_X * LOOP_X + tidx;
 
-	const long long thread_id = (blockIdx.y * gridDim.x + blockIdx.x)*BLOCK_DIMENSION_X*BLOCK_DIMENSION_Y +
-	                       threadIdx.y*BLOCK_DIMENSION_X + threadIdx.x;
+	const long long thread_id = (blockIdx.y * gridDim.x + blockIdx.x) * BLOCK_DIMENSION_X * BLOCK_DIMENSION_Y
+                            +  threadIdx.y*BLOCK_DIMENSION_X + threadIdx.x;
 
 	INT2_T __me[LOOP_Y][LOOP_X];
 
@@ -256,7 +254,7 @@ __global__ void spinUpdateV_2D_k(const long long seed, const int it,
 	for(int i = 0; i < LOOP_Y; i++) {
 		#pragma unroll
 		for(int j = 0; j < LOOP_X; j++) {
-			__me[i][j] = vDst[(begY+row+i*BLOCK_DIMENSION_Y)*dimX + col+j*BLOCK_DIMENSION_X];
+			__me[i][j] = checkerboard_agents[(row + i * BLOCK_DIMENSION_Y) * number_of_columns + col + j * BLOCK_DIMENSION_X];
 		}
 	}
 
@@ -268,14 +266,14 @@ __global__ void spinUpdateV_2D_k(const long long seed, const int it,
 	for(int i = 0; i < LOOP_Y; i++) {
 		#pragma unroll
 		for(int j = 0; j < LOOP_X; j++) {
-			__up[i][j] = shared_tile[i * BLOCK_DIMENSION_Y +   tidy][j * BLOCK_DIMENSION_X + 1 + tidx];
-			__ct[i][j] = shared_tile[i * BLOCK_DIMENSION_Y + 1 + tidy][j * BLOCK_DIMENSION_X + 1 + tidx];
-			__dw[i][j] = shared_tile[i *  BLOCK_DIMENSION_Y + 2 + tidy][j * BLOCK_DIMENSION_X + 1 + tidx];
+			__up[i][j] = shared_tiles[i * BLOCK_DIMENSION_Y +     tidy][j * BLOCK_DIMENSION_X + 1 + tidx];
+			__ct[i][j] = shared_tiles[i * BLOCK_DIMENSION_Y + 1 + tidy][j * BLOCK_DIMENSION_X + 1 + tidx];
+			__dw[i][j] = shared_tiles[i * BLOCK_DIMENSION_Y + 2 + tidy][j * BLOCK_DIMENSION_X + 1 + tidx];
 		}
 	}
 
 	// BLOCK_DIMENSION_Y is power of two so row parity won't change across loops
-	const int readBack = (COLOR == C_BLACK) ? !(row%2) : (row%2);
+	const int read_black = (COLOR == C_BLACK) ? !(row % 2) : (row%2);
 
 	INT2_T __sd[LOOP_Y][LOOP_X];
 
@@ -283,12 +281,12 @@ __global__ void spinUpdateV_2D_k(const long long seed, const int it,
 	for(int i = 0; i < LOOP_Y; i++) {
 		#pragma unroll
 		for(int j = 0; j < LOOP_X; j++) {
-			__sd[i][j] = (readBack) ? shared_tile[i*BLOCK_DIMENSION_Y + 1+tidy][j*BLOCK_DIMENSION_X +   tidx]:
-						  shared_tile[i*BLOCK_DIMENSION_Y + 1+tidy][j*BLOCK_DIMENSION_X + 2+tidx];
+			__sd[i][j] = (read_black) ? shared_tiles[i*BLOCK_DIMENSION_Y + 1+tidy][j*BLOCK_DIMENSION_X +   tidx]:
+						  shared_tiles[i*BLOCK_DIMENSION_Y + 1+tidy][j*BLOCK_DIMENSION_X + 2+tidx];
 		}
 	}
 
-	if (readBack) {
+	if (read_black) {
 		#pragma unroll
 		for(int i = 0; i < LOOP_Y; i++) {
 			#pragma unroll
@@ -309,7 +307,7 @@ __global__ void spinUpdateV_2D_k(const long long seed, const int it,
 	}
 
 	curandStatePhilox4_32_10_t rng;
-	curand_init(seed, thread_id, static_cast<long long>(2*SPIN_X_WORD)*LOOP_X*LOOP_Y*(2*it+COLOR), &rng);
+	curand_init(seed, thread_id, static_cast<long long>(2*SPIN_X_WORD)*LOOP_X*LOOP_Y*(2*number_of_previous_iterations+COLOR), &rng);
 
 	#pragma unroll
 	for(int i = 0; i < LOOP_Y; i++) {
@@ -330,7 +328,7 @@ __global__ void spinUpdateV_2D_k(const long long seed, const int it,
 		#pragma unroll
 		for(int j = 0; j < LOOP_X; j++) {
 			#pragma unroll
-			for(int z = 0; z < 8*sizeof(INT_T); z += BITXSPIN) {
+			for(int z = 0; z < 8 * sizeof(INT_T); z += BITXSPIN) {
 
 				const int2 __src = make_int2((__me[i][j].x >> z) & 0xF,
 							     (__me[i][j].y >> z) & 0xF);
@@ -354,7 +352,7 @@ __global__ void spinUpdateV_2D_k(const long long seed, const int it,
 	for(int i = 0; i < LOOP_Y; i++) {
 		#pragma unroll
 		for(int j = 0; j < LOOP_X; j++) {
-			vDst[(begY + row+i*BLOCK_DIMENSION_Y)*dimX + col+j*BLOCK_DIMENSION_X] = __me[i][j];
+			checkerboard_agents[(row+i*BLOCK_DIMENSION_Y)*number_of_columns + col+j*BLOCK_DIMENSION_X] = __me[i][j];
 		}
 	}
 	return;
@@ -362,7 +360,7 @@ __global__ void spinUpdateV_2D_k(const long long seed, const int it,
 
 
 template<int BLOCK_DIMENSION_X, int WSIZE, typename T>
-__device__ __forceinline__ T __block_sum(T v)
+__device__ __forceinline__ T __block_sum(T traders)
 {
 	__shared__ T sh[BLOCK_DIMENSION_X / WSIZE];
 
@@ -371,27 +369,27 @@ __device__ __forceinline__ T __block_sum(T v)
 
 	#pragma unroll
 	for(int i = WSIZE/2; i; i >>= 1) {
-		v += __shfl_down_sync(0xFFFFFFFF, v, i);
+		traders += __shfl_down_sync(0xFFFFFFFF, traders, i);
 	}
-	if (lid == 0) sh[wid] = v;
+	if (lid == 0) sh[wid] = traders;
 
 	__syncthreads();
 	if (wid == 0) {
-		v = (lid < (BLOCK_DIMENSION_X / WSIZE)) ? sh[lid] : 0;
+		traders = (lid < (BLOCK_DIMENSION_X / WSIZE)) ? sh[lid] : 0;
 
 		#pragma unroll
 		for(int i = (BLOCK_DIMENSION_X/WSIZE)/2; i; i >>= 1) {
-			v += __shfl_down_sync(0xFFFFFFFF, v, i);
+			traders += __shfl_down_sync(0xFFFFFFFF, traders, i);
 		}
 	}
 	__syncthreads();
-	return v;
+	return traders;
 }
 
 // to be optimized
 template<int BLOCK_DIMENSION_X, int BITXSPIN, typename INT_T, typename SUM_T>
 __global__ void getMagn_k(const long long n,
-			                    const INT_T *__restrict__ v,
+			                    const INT_T *__restrict__ traders,
 			                    SUM_T *__restrict__ sum)
 {
 
@@ -405,7 +403,7 @@ __global__ void getMagn_k(const long long n,
 
 	for(long long i = 0; i < n; i += nth) {
 		if (i+thread_id < n) {
-			const int __c = __mypopc(v[i+thread_id]);
+			const int __c = __mypopc(traders[i+thread_id]);
 			__cntP += __c;
 			__cntN += SPIN_X_WORD - __c;
 		}
@@ -414,8 +412,8 @@ __global__ void getMagn_k(const long long n,
 	__cntN = __block_sum<BLOCK_DIMENSION_X, 32>(__cntN);
 
 	if (threadIdx.x == 0) {
-		atomicAdd(sum+0, __cntP);
-		atomicAdd(sum+1, __cntN);
+		atomicAdd(sum + 0, __cntP);
+		atomicAdd(sum + 1, __cntN);
 	}
 	return;
 }
@@ -423,7 +421,6 @@ __global__ void getMagn_k(const long long n,
 
 static void countSpins(const int redBlocks,
 								       const size_t total_length,
-								       const size_t sublattice_length,
 								       const unsigned long long *d_black_tiles,
 								       const unsigned long long *d_white_tiles,
 									     unsigned long long **sum_d,
@@ -494,10 +491,8 @@ int main(int argc, char **argv) {
 	printf("\n");
 
 	size_t words_per_row = (grid_width / 2) / SPIN_X_WORD;
-	// length of a single color section per GPU
-	size_t sublattice_length = static_cast<size_t>(grid_height) * words_per_row;
 	// total lattice length
-	size_t total_length = 2ull * sublattice_length;
+	size_t total_length = 2ull * static_cast<size_t>(grid_height) * words_per_row;
 
 	dim3 grid(DIV_UP(words_per_row / 2, BLOCK_DIMENSION_X_DEFINE * BMULT_X), DIV_UP(grid_height, BLOCK_DIMENSION_Y_DEFINE * BMULT_Y));
 	dim3 block(BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE);
@@ -517,14 +512,14 @@ int main(int argc, char **argv) {
 
 	printf("\tlattice size:      %8d x %8d\n", grid_height, grid_width);
 	printf("\tlattice shape: 2 x %8d x %8zu (%12zu %s)\n", grid_height, words_per_row, total_length, sizeof(*d_spins) == 4 ? "uints" : "ulls");
-	printf("\tmemory: %.2lf MB (%.2lf MB per GPU)\n", (total_length*sizeof(*d_spins))/(1024.0 * 1024.0), sublattice_length * 2 * sizeof(*d_spins) / (1024.0 * 1024.0));
+	printf("\tmemory: %.2lf MB \n", (total_length * sizeof(*d_spins)) / (1024.0 * 1024.0));
 
 	const int redBlocks = MIN(DIV_UP(total_length, THREADS),
 				  (props.maxThreadsPerMultiProcessor/THREADS)*props.multiProcessorCount);
 
 	unsigned long long cntPos;
 	unsigned long long cntNeg;
-	unsigned long long *sum_d[MAX_GPU];
+	unsigned long long *sum_d[0];
 
 	CHECK_CUDA(cudaMalloc(&d_spins, total_length*sizeof(*d_spins)));
 	CHECK_CUDA(cudaMemset(d_spins, 0, total_length*sizeof(*d_spins)));
@@ -535,7 +530,7 @@ int main(int argc, char **argv) {
 	d_black_tiles = d_spins;
 	d_white_tiles = d_spins + total_length/2;
 
-	float *exp_d[MAX_GPU];
+	float *exp_d[0];
 	float  exp_h[2][5];
 
 	// precompute possible exponentials
@@ -573,7 +568,7 @@ int main(int argc, char **argv) {
 	CHECK_ERROR("initialise_traders");
 
 	// computes sum over array
-	countSpins(redBlocks, total_length, sublattice_length, d_black_tiles, d_white_tiles, sum_d, &cntPos, &cntNeg);
+	countSpins(redBlocks, total_length, d_black_tiles, d_white_tiles, sum_d, &cntPos, &cntNeg);
 	printf("\nInitial magnetization: %9.6lf, up_s: %12llu, dw_s: %12llu\n",
 	       abs(static_cast<double>(cntPos)-static_cast<double>(cntNeg)) / (total_length*SPIN_X_WORD),
 	       cntPos, cntNeg);
@@ -587,17 +582,17 @@ int main(int argc, char **argv) {
 	for(iteration = 0; iteration < total_updates; iteration++) {
 
 		CHECK_CUDA(cudaSetDevice(0));
-		spinUpdateV_2D_k<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BMULT_X, BMULT_Y, BIT_X_SPIN, C_BLACK, unsigned long long>
+		update_strategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BMULT_X, BMULT_Y, BIT_X_SPIN, C_BLACK, unsigned long long>
 		<<<grid, block>>>
-		(seed, iteration + 1, (XSL / 2) / SPIN_X_WORD / 2, YSL, 0, words_per_row / 2,
+		(seed, iteration + 1, (XSL / 2) / SPIN_X_WORD / 2, YSL, words_per_row / 2,
 		 reinterpret_cast<float (*)[5]>(exp_d[0]),
 		 reinterpret_cast<ulonglong2 *>(d_white_tiles),
 		 reinterpret_cast<ulonglong2 *>(d_black_tiles));
 
 		CHECK_CUDA(cudaSetDevice(0));
-		spinUpdateV_2D_k<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BMULT_X, BMULT_Y, BIT_X_SPIN, C_WHITE, unsigned long long>
+		update_strategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BMULT_X, BMULT_Y, BIT_X_SPIN, C_WHITE, unsigned long long>
 		<<<grid, block>>>
-		(seed, iteration + 1, (XSL / 2) / SPIN_X_WORD / 2, YSL, 0, words_per_row / 2,
+		(seed, iteration + 1, (XSL / 2) / SPIN_X_WORD / 2, YSL, words_per_row / 2,
 		 reinterpret_cast<float (*)[5]>(exp_d[0]),
 		 reinterpret_cast<ulonglong2 *>(d_black_tiles),
 		 reinterpret_cast<ulonglong2 *>(d_white_tiles));
@@ -606,7 +601,7 @@ int main(int argc, char **argv) {
 	CHECK_CUDA(cudaEventSynchronize(stop));
 
 	// compute total sum
-	countSpins(redBlocks, total_length, sublattice_length, d_black_tiles, d_white_tiles, sum_d, &cntPos, &cntNeg);
+	countSpins(redBlocks, total_length, d_black_tiles, d_white_tiles, sum_d, &cntPos, &cntNeg);
 	printf("Final   magnetization: %9.6lf, up_s: %12llu, dw_s: %12llu (iter: %8d)\n\n",
 	       abs(static_cast<double>(cntPos)-static_cast<double>(cntNeg)) / (total_length*SPIN_X_WORD),
 	       cntPos, cntNeg, iteration);
@@ -614,7 +609,7 @@ int main(int argc, char **argv) {
 	CHECK_CUDA(cudaEventElapsedTime(&elapsed_time, start, stop));
 
 	printf("Kernel execution time for %d update steps: %E ms, %.2lf flips/ns (BW: %.2lf GB/s)\n",
-		iteration, elapsed_time, static_cast<double>(total_length*SPIN_X_WORD) * iteration / (elapsed_time * 1.0E+6),
+		iteration, elapsed_time, static_cast<double>(total_length * SPIN_X_WORD) * iteration / (elapsed_time * 1.0E+6),
 		(2ull * iteration * (
 			  sizeof(*d_spins)*((total_length / 2) + (total_length / 2) + (total_length / 2))  // src color read, dst color read, dst color write
 			+ sizeof(*exp_d) * 5 * grid.x * grid.y ) * 1.0E-9) / (elapsed_time / 1.0E+3));
