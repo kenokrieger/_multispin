@@ -42,8 +42,6 @@
 */
 #define BLOCK_DIMENSION_X_DEFINE (16)
 #define BLOCK_DIMENSION_Y_DEFINE (16)
-#define BMULT_X (1)
-#define BMULT_Y (1)
 
 #define TOTAL_UPDATES_DEFAULT (10000)
 #define SEED_DEFAULT  (463463564571ull)
@@ -174,7 +172,7 @@ __device__ void load_tiles(const int grid_width, const int grid_height, const lo
 }
 
 
-template<int BLOCK_DIMENSION_X, int BLOCK_DIMENSION_Y, int LOOP_X, int LOOP_Y, int BITXSPIN, int COLOR, typename INT_T, typename INT2_T>
+template<int BLOCK_DIMENSION_X, int BLOCK_DIMENSION_Y, int BITXSPIN, int COLOR, typename INT_T, typename INT2_T>
 __global__ void update_strategies(const long long seed, const int number_of_previous_iterations,
 		      const int grid_width, // lattice width of one color in words
 		      const int grid_height, // lattice height (not in words)
@@ -188,9 +186,9 @@ __global__ void update_strategies(const long long seed, const int number_of_prev
 	const int tidx = threadIdx.x;
 	const int tidy = threadIdx.y;
 
-	__shared__ INT2_T shared_tiles[BLOCK_DIMENSION_Y * LOOP_Y + 2][BLOCK_DIMENSION_X * LOOP_X + 2];
+	__shared__ INT2_T shared_tiles[BLOCK_DIMENSION_Y + 2][BLOCK_DIMENSION_X + 2];
 
-	load_tiles<BLOCK_DIMENSION_X, BLOCK_DIMENSION_Y, BLOCK_DIMENSION_X * LOOP_X, BLOCK_DIMENSION_Y * LOOP_Y, INT2_T>
+	load_tiles<BLOCK_DIMENSION_X, BLOCK_DIMENSION_Y, BLOCK_DIMENSION_X, BLOCK_DIMENSION_Y, INT2_T>
   (grid_width, grid_height, number_of_columns, traders, shared_tiles);
 
 	__shared__ float __shExp[2][5];
@@ -209,119 +207,72 @@ __global__ void update_strategies(const long long seed, const int number_of_prev
 	}
 	__syncthreads();
 
-	const int row = blockIdx.y * BLOCK_DIMENSION_Y * LOOP_Y + tidy;
-	const int col = blockIdx.x * BLOCK_DIMENSION_X * LOOP_X + tidx;
+	const int row = blockIdx.y * BLOCK_DIMENSION_Y + tidy;
+	const int col = blockIdx.x * BLOCK_DIMENSION_X + tidx;
 
 	const long long thread_id = (blockIdx.y * gridDim.x + blockIdx.x) * BLOCK_DIMENSION_X * BLOCK_DIMENSION_Y
                             +  threadIdx.y*BLOCK_DIMENSION_X + threadIdx.x;
 
-	INT2_T __me[LOOP_Y][LOOP_X];
+	INT2_T __me[1][1];
 
-	#pragma unroll
-	for(int i = 0; i < LOOP_Y; i++) {
-		#pragma unroll
-		for(int j = 0; j < LOOP_X; j++) {
-			__me[i][j] = checkerboard_agents[(row + i * BLOCK_DIMENSION_Y) * number_of_columns + col + j * BLOCK_DIMENSION_X];
-		}
-	}
+	__me[0][0] = checkerboard_agents[row * number_of_columns + col];
 
-	INT2_T __up[LOOP_Y][LOOP_X];
-	INT2_T __ct[LOOP_Y][LOOP_X];
-	INT2_T __dw[LOOP_Y][LOOP_X];
 
-	#pragma unroll
-	for(int i = 0; i < LOOP_Y; i++) {
-		#pragma unroll
-		for(int j = 0; j < LOOP_X; j++) {
-			__up[i][j] = shared_tiles[i * BLOCK_DIMENSION_Y +     tidy][j * BLOCK_DIMENSION_X + 1 + tidx];
-			__ct[i][j] = shared_tiles[i * BLOCK_DIMENSION_Y + 1 + tidy][j * BLOCK_DIMENSION_X + 1 + tidx];
-			__dw[i][j] = shared_tiles[i * BLOCK_DIMENSION_Y + 2 + tidy][j * BLOCK_DIMENSION_X + 1 + tidx];
-		}
-	}
+	INT2_T __up[1][1];
+	INT2_T __ct[1][1];
+	INT2_T __dw[1][1];
+
+	__up[0][0] = shared_tiles[    tidy][1 + tidx];
+	__ct[0][0] = shared_tiles[1 + tidy][1 + tidx];
+	__dw[0][0] = shared_tiles[2 + tidy][1 + tidx];
+
 
 	// BLOCK_DIMENSION_Y is power of two so row parity won't change across loops
-	const int read_black = (COLOR == C_BLACK) ? !(row % 2) : (row%2);
+	const int read_black = (COLOR == C_BLACK) ? !(row % 2) : (row % 2);
 
-	INT2_T __sd[LOOP_Y][LOOP_X];
+	INT2_T __sd[1][1];
+	__sd[0][0] = (read_black) ? shared_tiles[1 + tidy][tidx] : shared_tiles[1 + tidy][2 + tidx];
 
-	#pragma unroll
-	for(int i = 0; i < LOOP_Y; i++) {
-		#pragma unroll
-		for(int j = 0; j < LOOP_X; j++) {
-			__sd[i][j] = (read_black) ? shared_tiles[i*BLOCK_DIMENSION_Y + 1+tidy][j*BLOCK_DIMENSION_X +   tidx]:
-						  shared_tiles[i*BLOCK_DIMENSION_Y + 1+tidy][j*BLOCK_DIMENSION_X + 2+tidx];
-		}
-	}
 
 	if (read_black) {
-		#pragma unroll
-		for(int i = 0; i < LOOP_Y; i++) {
-			#pragma unroll
-			for(int j = 0; j < LOOP_X; j++) {
-				__sd[i][j].x = (__ct[i][j].x << BITXSPIN) | (__sd[i][j].y >> (8*sizeof(__sd[i][j].y)-BITXSPIN));
-				__sd[i][j].y = (__ct[i][j].y << BITXSPIN) | (__ct[i][j].x >> (8*sizeof(__ct[i][j].x)-BITXSPIN));
-			}
-		}
+  	__sd[0][0].x = (__ct[0][0].x << BITXSPIN) | (__sd[0][0].y >> (8*sizeof(__sd[0][0].y)-BITXSPIN));
+  	__sd[0][0].y = (__ct[0][0].y << BITXSPIN) | (__ct[0][0].x >> (8*sizeof(__ct[0][0].x)-BITXSPIN));
 	} else {
-		#pragma unroll
-		for(int i = 0; i < LOOP_Y; i++) {
-			#pragma unroll
-			for(int j = 0; j < LOOP_X; j++) {
-				__sd[i][j].y = (__ct[i][j].y >> BITXSPIN) | (__sd[i][j].x << (8*sizeof(__sd[i][j].x)-BITXSPIN));
-				__sd[i][j].x = (__ct[i][j].x >> BITXSPIN) | (__ct[i][j].y << (8*sizeof(__ct[i][j].y)-BITXSPIN));
-			}
-		}
+		__sd[0][0].y = (__ct[0][0].y >> BITXSPIN) | (__sd[0][0].x << (8*sizeof(__sd[0][0].x)-BITXSPIN));
+		__sd[0][0].x = (__ct[0][0].x >> BITXSPIN) | (__ct[0][0].y << (8*sizeof(__ct[0][0].y)-BITXSPIN));
 	}
 
 	curandStatePhilox4_32_10_t rng;
-	curand_init(seed, thread_id, static_cast<long long>(2*SPIN_X_WORD)*LOOP_X*LOOP_Y*(2*number_of_previous_iterations+COLOR), &rng);
+	curand_init(seed, thread_id, static_cast<long long>(2 * SPIN_X_WORD) * (2 * number_of_previous_iterations + COLOR), &rng);
 
-	#pragma unroll
-	for(int i = 0; i < LOOP_Y; i++) {
-		#pragma unroll
-		for(int j = 0; j < LOOP_X; j++) {
-			__ct[i][j].x += __up[i][j].x;
-			__dw[i][j].x += __sd[i][j].x;
-			__ct[i][j].x += __dw[i][j].x;
+	__ct[0][0].x += __up[0][0].x;
+	__dw[0][0].x += __sd[0][0].x;
+	__ct[0][0].x += __dw[0][0].x;
 
-			__ct[i][j].y += __up[i][j].y;
-			__dw[i][j].y += __sd[i][j].y;
-			__ct[i][j].y += __dw[i][j].y;
+	__ct[0][0].y += __up[0][0].y;
+	__dw[0][0].y += __sd[0][0].y;
+	__ct[0][0].y += __dw[0][0].y;
+
+	for(int z = 0; z < 8 * sizeof(INT_T); z += BITXSPIN) {
+
+		const int2 __src = make_int2((__me[0][0].x >> z) & 0xF,
+					     (__me[0][0].y >> z) & 0xF);
+
+		const int2 __sum = make_int2((__ct[0][0].x >> z) & 0xF,
+					     (__ct[0][0].y >> z) & 0xF);
+
+		const INT_T ONE = static_cast<INT_T>(1);
+
+		if (curand_uniform(&rng) <= __shExp[__src.x][__sum.x]) {
+			__me[0][0].x ^= ONE << z;
+		}
+		if (curand_uniform(&rng) <= __shExp[__src.y][__sum.y]) {
+			__me[0][0].y ^= ONE << z;
 		}
 	}
 
-	#pragma unroll
-	for(int i = 0; i < LOOP_Y; i++) {
-		#pragma unroll
-		for(int j = 0; j < LOOP_X; j++) {
-			#pragma unroll
-			for(int z = 0; z < 8 * sizeof(INT_T); z += BITXSPIN) {
+	checkerboard_agents[row * number_of_columns + col] = __me[0][0];
 
-				const int2 __src = make_int2((__me[i][j].x >> z) & 0xF,
-							     (__me[i][j].y >> z) & 0xF);
-
-				const int2 __sum = make_int2((__ct[i][j].x >> z) & 0xF,
-							     (__ct[i][j].y >> z) & 0xF);
-
-				const INT_T ONE = static_cast<INT_T>(1);
-
-				if (curand_uniform(&rng) <= __shExp[__src.x][__sum.x]) {
-					__me[i][j].x ^= ONE << z;
-				}
-				if (curand_uniform(&rng) <= __shExp[__src.y][__sum.y]) {
-					__me[i][j].y ^= ONE << z;
-				}
-			}
-		}
-	}
-
-	#pragma unroll
-	for(int i = 0; i < LOOP_Y; i++) {
-		#pragma unroll
-		for(int j = 0; j < LOOP_X; j++) {
-			checkerboard_agents[(row+i*BLOCK_DIMENSION_Y)*number_of_columns + col+j*BLOCK_DIMENSION_X] = __me[i][j];
-		}
-	}
 	return;
 }
 
@@ -549,7 +500,7 @@ int main(int argc, char **argv) {
 	for(iteration = 0; iteration < total_updates; iteration++) {
 
 		CHECK_CUDA(cudaSetDevice(0));
-		update_strategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BMULT_X, BMULT_Y, BIT_X_SPIN, C_BLACK, unsigned long long>
+		update_strategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_BLACK, unsigned long long>
 		<<<grid, block>>>
 		(seed, iteration + 1, (XSL / 2) / SPIN_X_WORD / 2, YSL, words_per_row / 2,
 		 reinterpret_cast<float (*)[5]>(exp_d[0]),
@@ -557,7 +508,7 @@ int main(int argc, char **argv) {
 		 reinterpret_cast<ulonglong2 *>(d_black_tiles));
 
 		CHECK_CUDA(cudaSetDevice(0));
-		update_strategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BMULT_X, BMULT_Y, BIT_X_SPIN, C_WHITE, unsigned long long>
+		update_strategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_WHITE, unsigned long long>
 		<<<grid, block>>>
 		(seed, iteration + 1, (XSL / 2) / SPIN_X_WORD / 2, YSL, words_per_row / 2,
 		 reinterpret_cast<float (*)[5]>(exp_d[0]),
