@@ -77,17 +77,17 @@ __global__  void initialise_traders(const long long seed, const long long number
 	for(int bit_position = 0; bit_position < 8 * sizeof(INT_T); bit_position += BITXSPIN) {
 		// These two if clauses are not identical since curand_uniform()
 		// returns a different number on each invokation
+    /*
+     * shift the spin with value 1 to its respective position and then
+     * assign the matching bit the value 1 by using the bitwise
+     * logical or operator |=
+     * shift: 0000000000000000001 -> 0000000000010000000
+     * logical bitwise or with tmp:
+     * tmp[i][j] =                0000000000000001000
+     * INT_T(1) << bit_position = 0000000000010000000
+     * =>  tmp[i][j] =            0000000000010001000
+     */
 		if (curand_uniform(&rng) < 0.5f) {
-      /*
-       * shift the spin with value 1 to its respective position and then
-       * assign the matching bit the value 1 by using the bitwise
-       * logical or operator |=
-       * shift: 0000000000000000001 -> 0000000000010000000
-       * logical bitwise or with tmp:
-       * tmp[i][j] =                0000000000000001000
-       * INT_T(1) << bit_position = 0000000000010000000
-       * =>  tmp[i][j] =            0000000000010001000
-       */
 			traders[index].x |= INT_T(1) << bit_position;
 		}
 		if (curand_uniform(&rng) < 0.5f) {
@@ -172,14 +172,34 @@ __device__ void load_tiles(const int grid_width, const int grid_height, const lo
 }
 
 
+__device__ void load_probabilities(const float precomputed_probabilities[][5], float shared_probabilities[2][5],
+                                   const int block_dimension_x, const int block_dimension_y,
+                                   const int tidx, const int tidy)
+{
+  // load precomputed exponentials into shared memory
+  // in case a block consists of less than 2 * 5 threads iterate over the
+  // precomputed array in each thread
+  #pragma unroll
+  for(int i = 0; i < 2; i += block_dimension_x) {
+    #pragma unroll
+    for(int j = 0; j < 5; j += block_dimension_y) {
+      if (i + tidy < 2 && j + tidx < 5) {
+        shared_probabilities[i + tidy][j + tidx] = precomputed_probabilities[i + tidy][j + tidx];
+      }
+    }
+  }
+  return;
+}
+
+
 template<int BLOCK_DIMENSION_X, int BLOCK_DIMENSION_Y, int BITXSPIN, int COLOR, typename INT_T, typename INT2_T>
 __global__ void update_strategies(const long long seed, const int number_of_previous_iterations,
-		      const int grid_width, // lattice width of one color in words
-		      const int grid_height, // lattice height (not in words)
-		      const long long number_of_columns,
-		      const float vExp[][5],
-		      const INT2_T *__restrict__ traders,
-		            INT2_T *__restrict__ checkerboard_agents)
+		       const int grid_width, // lattice width of one color in words
+		       const int grid_height, // lattice height (not in words)
+		       const long long number_of_columns,
+		       const float precomputed_probabilities[][5],
+		       const INT2_T *__restrict__ traders,
+		             INT2_T *__restrict__ checkerboard_agents)
 {
 	const int SPIN_X_WORD = 8 * sizeof(INT_T) / BITXSPIN;
 
@@ -187,42 +207,27 @@ __global__ void update_strategies(const long long seed, const int number_of_prev
 	const int tidy = threadIdx.y;
 
 	__shared__ INT2_T shared_tiles[BLOCK_DIMENSION_Y + 2][BLOCK_DIMENSION_X + 2];
-
 	load_tiles<BLOCK_DIMENSION_X, BLOCK_DIMENSION_Y, BLOCK_DIMENSION_X, BLOCK_DIMENSION_Y, INT2_T>
   (grid_width, grid_height, number_of_columns, traders, shared_tiles);
 
-	__shared__ float __shExp[2][5];
+	__shared__ float __shared_probabilities[2][5];
+  load_probabilities(precomputed_probabilities, __shared_probabilities, BLOCK_DIMENSION_X, BLOCK_DIMENSION_Y, tidx, tidy);
 
-  // load precomputed exponentials into shared memory
-  // in case a block consists of less than 2 * 5 threads iterate over the
-  // precomputed array in each thread
-	#pragma unroll
-	for(int i = 0; i < 2; i += BLOCK_DIMENSION_Y) {
-		#pragma unroll
-		for(int j = 0; j < 5; j += BLOCK_DIMENSION_X) {
-			if (i + tidy < 2 && j + tidx < 5) {
-				__shExp[i + tidy][j + tidx] = vExp[i + tidy][j + tidx];
-			}
-		}
-	}
 	__syncthreads();
 
 	const int row = blockIdx.y * BLOCK_DIMENSION_Y + tidy;
 	const int col = blockIdx.x * BLOCK_DIMENSION_X + tidx;
 
 	const long long thread_id = (blockIdx.y * gridDim.x + blockIdx.x) * BLOCK_DIMENSION_X * BLOCK_DIMENSION_Y
-                            +  threadIdx.y*BLOCK_DIMENSION_X + threadIdx.x;
+                            +  threadIdx.y * BLOCK_DIMENSION_X + threadIdx.x;
 
-	INT2_T __me[1][1];
-
-	__me[0][0] = checkerboard_agents[row * number_of_columns + col];
+	INT2_T __me = checkerboard_agents[row * number_of_columns + col];
 
 
-	INT2_T __up[1][1];
+	INT2_T __up = shared_tiles[    tidy][1 + tidx];
 	INT2_T __ct[1][1];
 	INT2_T __dw[1][1];
 
-	__up[0][0] = shared_tiles[    tidy][1 + tidx];
 	__ct[0][0] = shared_tiles[1 + tidy][1 + tidx];
 	__dw[0][0] = shared_tiles[2 + tidy][1 + tidx];
 
@@ -263,10 +268,10 @@ __global__ void update_strategies(const long long seed, const int number_of_prev
 
 		const INT_T ONE = static_cast<INT_T>(1);
 
-		if (curand_uniform(&rng) <= __shExp[__src.x][__sum.x]) {
+		if (curand_uniform(&rng) <= __shared_probabilities[__src.x][__sum.x]) {
 			__me[0][0].x ^= ONE << z;
 		}
-		if (curand_uniform(&rng) <= __shExp[__src.y][__sum.y]) {
+		if (curand_uniform(&rng) <= __shared_probabilities[__src.y][__sum.y]) {
 			__me[0][0].y ^= ONE << z;
 		}
 	}
