@@ -26,7 +26,7 @@
 #include <curand_kernel.h>
 #include "cudamacro.h"
 
-#define DIV_UP(a,b)     (((a)+((b)-1))/(b))
+#define DIV_UP(a,b)  (((a)+((b)-1))/(b))
 #define MIN(a,b)	(((a)<(b))?(a):(b))
 #define MAX(a,b)	(((a)>(b))?(a):(b))
 
@@ -73,7 +73,7 @@ __global__  void initialise_traders(const long long seed, const long long number
 	curandStatePhilox4_32_10_t rng;
 	curand_init(seed, thread_id, static_cast<long long>(2 * SPIN_X_WORD) * COLOR, &rng);
 
-  traders[index] = __mymake_int2(INT_T(0),INT_T(0));
+  traders[index] = __mymake_int2(INT_T(0), INT_T(0));
 	for(int bit_position = 0; bit_position < 8 * sizeof(INT_T); bit_position += BITXSPIN) {
 		// These two if clauses are not identical since curand_uniform()
 		// returns a different number on each invokation
@@ -98,7 +98,7 @@ __global__  void initialise_traders(const long long seed, const long long number
 }
 
 
-template<int BLOCK_DIMENSION_X, int BLOCK_DIMENSION_Y, int TILE_SIZE_X, int TILE_SIZE_Y, typename INT2_T>
+template<int TILE_SIZE_X, int TILE_SIZE_Y, typename INT2_T>
 __device__ void load_tiles(const int grid_width, const int grid_height, const long long number_of_columns,
                            const INT2_T *__restrict__ traders, INT2_T tile[][TILE_SIZE_X + 2])
     /*
@@ -111,62 +111,23 @@ __device__ void load_tiles(const int grid_width, const int grid_height, const lo
 	const int tile_start_x = blockIdx.x * TILE_SIZE_X;
 	const int tile_start_y = blockIdx.y * TILE_SIZE_Y;
 
-	#pragma unroll
-	for(int tile_row = 0; tile_row < TILE_SIZE_Y; tile_row += BLOCK_DIMENSION_Y) {
-		int row_in_source = tile_start_y + tile_row + tidy;
+	int row = tile_start_y + tidy;
+	int col = tile_start_x + tidx;
+	tile[1 + tidy][1 + tidx] = traders[row * number_of_columns + col];
 
-		#pragma unroll
-		for(int tile_col = 0; tile_col < TILE_SIZE_X; tile_col += BLOCK_DIMENSION_X) {
-			const int column_in_source = tile_start_x + tile_col + tidx;
-			tile[1 + tile_row + tidy][1 + tile_col + tidx] = traders[row_in_source * number_of_columns + column_in_source];
-		}
-	}
 	if (tidy == 0) {
-		int row_in_source = (tile_start_y % grid_height) == 0 ? tile_start_y + grid_height - 1 : tile_start_y - 1;
+		row = (tile_start_y % grid_height) == 0 ? tile_start_y + grid_height - 1 : tile_start_y - 1;
+		tile[0][1 + tidx] = traders[row * number_of_columns + col];
+		row = ((tile_start_y + TILE_SIZE_Y) % grid_height) == 0 ? tile_start_y + TILE_SIZE_Y - grid_height : tile_start_y + TILE_SIZE_Y;
+		tile[1 + TILE_SIZE_Y][1 + tidx] = traders[row * number_of_columns + col];
 
-		#pragma unroll
-		for(int tile_col = 0; tile_col < TILE_SIZE_X; tile_col += BLOCK_DIMENSION_X) {
-			const int column_in_source = tile_start_x + tile_col + tidx;
-			tile[0][1 + tile_col + tidx] = traders[row_in_source * number_of_columns + column_in_source];
-		}
+		col = (tile_start_x % grid_width) == 0 ? tile_start_x + grid_width - 1 : tile_start_x - 1;
+		row = tile_start_y + tidx;
+		tile[1 + tidx][0] = traders[row * number_of_columns + col];
 
-		row_in_source = ((tile_start_y + TILE_SIZE_Y) % grid_height) == 0 ? tile_start_y + TILE_SIZE_Y - grid_height : tile_start_y + TILE_SIZE_Y;
-
-		#pragma unroll
-		for(int i = 0; i < TILE_SIZE_X; i += BLOCK_DIMENSION_X) {
-			const int column_in_source = tile_start_x + i + tidx;
-			tile[1 + TILE_SIZE_Y][1 + i + tidx] = traders[row_in_source * number_of_columns + column_in_source];
-		}
-
-		// the other branch in slower so skip it if possible
-		if (BLOCK_DIMENSION_X <= TILE_SIZE_Y) {
-
-			int column_in_source = (tile_start_x % grid_width) == 0 ? tile_start_x + grid_width - 1 : tile_start_x - 1;
-
-			#pragma unroll
-			for(int j = 0; j < TILE_SIZE_Y; j += BLOCK_DIMENSION_X) {
-				row_in_source = tile_start_y + j + tidx;
-				tile[1 + j + tidx][0] = traders[row_in_source * number_of_columns + column_in_source];
-			}
-
-			column_in_source = ((tile_start_x + TILE_SIZE_X) % grid_width) == 0 ? tile_start_x + TILE_SIZE_X - grid_width : tile_start_x + TILE_SIZE_X;
-
-			#pragma unroll
-			for(int j = 0; j < TILE_SIZE_Y; j += BLOCK_DIMENSION_X) {
-				row_in_source = tile_start_y + j + tidx;
-				tile[1 + j + tidx][1 + TILE_SIZE_X] = traders[row_in_source * number_of_columns + column_in_source];
-			}
-		} else {
-			if (tidx < TILE_SIZE_Y) {
-				int column_in_source = (tile_start_x % grid_width) == 0 ? tile_start_x + grid_width-1 : tile_start_x - 1;
-
-				row_in_source = tile_start_y + tidx;
-				tile[1 + tidx][0] = traders[row_in_source * number_of_columns + column_in_source];;
-
-				column_in_source = ((tile_start_x + TILE_SIZE_X) % grid_width) == 0 ? tile_start_x + TILE_SIZE_X - grid_width : tile_start_x + TILE_SIZE_X;
-				tile[1 + tidx][1 + TILE_SIZE_X] = traders[row_in_source * number_of_columns + column_in_source];
-			}
-		}
+		row = tile_start_y + tidx;
+		col = ((tile_start_x + TILE_SIZE_X) % grid_width) == 0 ? tile_start_x + TILE_SIZE_X - grid_width : tile_start_x + TILE_SIZE_X;
+		tile[1 + tidx][1 + TILE_SIZE_X] = traders[row * number_of_columns + col];
 	}
 	return;
 }
@@ -176,7 +137,7 @@ __device__ void load_probabilities(const float precomputed_probabilities[][5], f
                                    const int block_dimension_x, const int block_dimension_y,
                                    const int tidx, const int tidy)
 {
-  // load precomputed exponentials into shared memory
+  // load precomputed exponentials into shared memory.
   // in case a block consists of less than 2 * 5 threads
   // multiple iterations in each thread are needed
   // otherwise loops will only trigger once
@@ -208,7 +169,7 @@ __global__ void update_strategies(const long long seed, const int number_of_prev
 	const int tidy = threadIdx.y;
 
 	__shared__ INT2_T shared_tiles[BLOCK_DIMENSION_Y + 2][BLOCK_DIMENSION_X + 2];
-	load_tiles<BLOCK_DIMENSION_X, BLOCK_DIMENSION_Y, BLOCK_DIMENSION_X, BLOCK_DIMENSION_Y, INT2_T>
+	load_tiles<BLOCK_DIMENSION_X, BLOCK_DIMENSION_Y, INT2_T>
   (grid_width, grid_height, number_of_columns, traders, shared_tiles);
 
 	__shared__ float __shared_probabilities[2][5];
@@ -339,7 +300,7 @@ __global__ void getMagn_k(const long long n,
 
 
 static void countSpins(const int redBlocks,
-								       const size_t total_length,
+								       const size_t total_words,
 								       const unsigned long long *d_black_tiles,
 								       const unsigned long long *d_white_tiles,
 									     unsigned long long **sum_d,
@@ -347,7 +308,7 @@ static void countSpins(const int redBlocks,
 									     unsigned long long *wsum)
 {
 	CHECK_CUDA(cudaMemset(sum_d[0], 0, 2*sizeof(**sum_d)));
-	getMagn_k<THREADS, BIT_X_SPIN><<<redBlocks, THREADS>>>(total_length, d_black_tiles, sum_d[0]);
+	getMagn_k<THREADS, BIT_X_SPIN><<<redBlocks, THREADS>>>(total_words, d_black_tiles, sum_d[0]);
 	CHECK_ERROR("getMagn_k");
 	CHECK_CUDA(cudaDeviceSynchronize());
 
@@ -374,7 +335,6 @@ int main(int argc, char **argv) {
   float elapsed_time;
 
 	const int SPIN_X_WORD = (8 * sizeof(*d_spins)) / BIT_X_SPIN;
-
 	int grid_width = 2048;
 	int grid_height = 2048;
 
@@ -405,20 +365,21 @@ int main(int argc, char **argv) {
 		0, props.name, props.multiProcessorCount,
 		props.maxThreadsPerMultiProcessor,
 		props.major, props.minor,
-		props.ECCEnabled?"on":"off");
+		props.ECCEnabled ? "on" : "off");
 
 	printf("\n");
 
 	size_t words_per_row = (grid_width / 2) / SPIN_X_WORD;
 	// total lattice length
-	size_t total_length = 2ull * static_cast<size_t>(grid_height) * words_per_row;
+	size_t total_words = 2ull * static_cast<size_t>(grid_height) * words_per_row;
 
+	// words_per_row / 2 because each entry in the array has two components
 	dim3 grid(DIV_UP(words_per_row / 2, BLOCK_DIMENSION_X_DEFINE), DIV_UP(grid_height, BLOCK_DIMENSION_Y_DEFINE));
 	dim3 block(BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE);
 
 	printf("Run configuration:\n");
 	printf("\tspin/word: %d\n", SPIN_X_WORD);
-	printf("\tspins: %zu\n", total_length * SPIN_X_WORD);
+	printf("\tspins: %zu\n", total_words * SPIN_X_WORD);
 	printf("\tseed: %llu\n", seed);
 	printf("\titerations: %d\n", total_updates);
 	printf("\tblock (x, y): %d, %d\n", block.x, block.y);
@@ -430,24 +391,24 @@ int main(int argc, char **argv) {
 	printf("\n");
 
 	printf("\tlattice size:      %8d x %8d\n", grid_height, grid_width);
-	printf("\tlattice shape: 2 x %8d x %8zu (%12zu %s)\n", grid_height, words_per_row, total_length, sizeof(*d_spins) == 4 ? "uints" : "ulls");
-	printf("\tmemory: %.2lf MB \n", (total_length * sizeof(*d_spins)) / (1024.0 * 1024.0));
+	printf("\tlattice shape: 2 x %8d x %8zu (%12zu %s)\n", grid_height, words_per_row, total_words, sizeof(*d_spins) == 4 ? "uints" : "ulls");
+	printf("\tmemory: %.2lf MB \n", (total_words * sizeof(*d_spins)) / (1024.0 * 1024.0));
 
-	const int redBlocks = MIN(DIV_UP(total_length, THREADS),
+	const int redBlocks = MIN(DIV_UP(total_words, THREADS),
 				  (props.maxThreadsPerMultiProcessor/THREADS)*props.multiProcessorCount);
 
 	unsigned long long cntPos;
 	unsigned long long cntNeg;
 	unsigned long long *sum_d[0];
 
-	CHECK_CUDA(cudaMalloc(&d_spins, total_length*sizeof(*d_spins)));
-	CHECK_CUDA(cudaMemset(d_spins, 0, total_length*sizeof(*d_spins)));
+	CHECK_CUDA(cudaMalloc(&d_spins, total_words * sizeof(*d_spins)));
+	CHECK_CUDA(cudaMemset(d_spins, 0, total_words * sizeof(*d_spins)));
 
-	CHECK_CUDA(cudaMalloc(&sum_d[0], 2*sizeof(**sum_d)));
+	CHECK_CUDA(cudaMalloc(&sum_d[0], 2 * sizeof(**sum_d)));
 
 
 	d_black_tiles = d_spins;
-	d_white_tiles = d_spins + total_length/2;
+	d_white_tiles = d_spins + total_words / 2;
 
 	float *exp_d[0];
 	float  exp_h[2][5];
@@ -456,20 +417,20 @@ int main(int argc, char **argv) {
 	for(int i = 0; i < 2; i++) {
 		for(int j = 0; j < 5; j++) {
 			if(temp > 0) {
-				exp_h[i][j] = expf((i?-2.0f:2.0f)*static_cast<float>(j*2-4)*(1.0f/temp));
+				exp_h[i][j] = expf((i ? -2.0f : 2.0f) * static_cast<float>(j * 2 - 4) * (1.0f / temp));
 			} else {
 				if(j == 2) {
 					exp_h[i][j] = 0.5f;
 				} else {
-					exp_h[i][j] = (i?-2.0f:2.0f)*static_cast<float>(j*2-4);
+					exp_h[i][j] = (i ? -2.0f : 2.0f) * static_cast<float>(j * 2 - 4);
 				}
 			}
 		}
 	}
 
 	CHECK_CUDA(cudaSetDevice(0));
-	CHECK_CUDA(cudaMalloc(exp_d, 2*5*sizeof(**exp_d)));
-	CHECK_CUDA(cudaMemcpy(exp_d[0], exp_h, 2*5*sizeof(**exp_d), cudaMemcpyHostToDevice));
+	CHECK_CUDA(cudaMalloc(exp_d, 2 * 5 * sizeof(**exp_d)));
+	CHECK_CUDA(cudaMemcpy(exp_d[0], exp_h, 2 * 5 * sizeof(**exp_d), cudaMemcpyHostToDevice));
 
 
 	CHECK_CUDA(cudaEventCreate(&start));
@@ -487,9 +448,9 @@ int main(int argc, char **argv) {
 	CHECK_ERROR("initialise_traders");
 
 	// computes sum over array
-	countSpins(redBlocks, total_length, d_black_tiles, d_white_tiles, sum_d, &cntPos, &cntNeg);
+	countSpins(redBlocks, total_words, d_black_tiles, d_white_tiles, sum_d, &cntPos, &cntNeg);
 	printf("\nInitial magnetization: %9.6lf, up_s: %12llu, dw_s: %12llu\n",
-	       abs(static_cast<double>(cntPos)-static_cast<double>(cntNeg)) / (total_length*SPIN_X_WORD),
+	       abs(static_cast<double>(cntPos)-static_cast<double>(cntNeg)) / (total_words*SPIN_X_WORD),
 	       cntPos, cntNeg);
 
 	CHECK_CUDA(cudaSetDevice(0));
@@ -520,17 +481,17 @@ int main(int argc, char **argv) {
 	CHECK_CUDA(cudaEventSynchronize(stop));
 
 	// compute total sum
-	countSpins(redBlocks, total_length, d_black_tiles, d_white_tiles, sum_d, &cntPos, &cntNeg);
+	countSpins(redBlocks, total_words, d_black_tiles, d_white_tiles, sum_d, &cntPos, &cntNeg);
 	printf("Final   magnetization: %9.6lf, up_s: %12llu, dw_s: %12llu (iter: %8d)\n\n",
-	       abs(static_cast<double>(cntPos)-static_cast<double>(cntNeg)) / (total_length*SPIN_X_WORD),
+	       abs(static_cast<double>(cntPos)-static_cast<double>(cntNeg)) / (total_words*SPIN_X_WORD),
 	       cntPos, cntNeg, iteration);
 
 	CHECK_CUDA(cudaEventElapsedTime(&elapsed_time, start, stop));
 
 	printf("Kernel execution time for %d update steps: %E ms, %.2lf flips/ns (BW: %.2lf GB/s)\n",
-		iteration, elapsed_time, static_cast<double>(total_length * SPIN_X_WORD) * iteration / (elapsed_time * 1.0E+6),
+		iteration, elapsed_time, static_cast<double>(total_words * SPIN_X_WORD) * iteration / (elapsed_time * 1.0E+6),
 		(2ull * iteration * (
-			  sizeof(*d_spins)*((total_length / 2) + (total_length / 2) + (total_length / 2))  // src color read, dst color read, dst color write
+			  sizeof(*d_spins)*((total_words / 2) + (total_words / 2) + (total_words / 2))  // src color read, dst color read, dst color write
 			+ sizeof(*exp_d) * 5 * grid.x * grid.y ) * 1.0E-9) / (elapsed_time / 1.0E+3));
 
 	CHECK_CUDA(cudaFree(d_spins));
