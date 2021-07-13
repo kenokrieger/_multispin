@@ -82,10 +82,10 @@ __global__  void initialise_traders(const long long seed, const long long number
      * assign the matching bit the value 1 by using the bitwise
      * logical or operator |=
      * shift: 0000000000000000001 -> 0000000000010000000
-     * logical bitwise or with tmp:
-     * tmp[i][j] =                0000000000000001000
+     * logical bitwise or with traders:
+     * traders =                  0000000000000001000
      * INT_T(1) << bit_position = 0000000000010000000
-     * =>  tmp[i][j] =            0000000000010001000
+     * =>  traders =              0000000000010001000
      */
 		if (curand_uniform(&rng) < 0.5f) {
 			traders[index].x |= INT_T(1) << bit_position;
@@ -177,8 +177,9 @@ __device__ void load_probabilities(const float precomputed_probabilities[][5], f
                                    const int tidx, const int tidy)
 {
   // load precomputed exponentials into shared memory
-  // in case a block consists of less than 2 * 5 threads iterate over the
-  // precomputed array in each thread
+  // in case a block consists of less than 2 * 5 threads
+  // multiple iterations in each thread are needed
+  // otherwise loops will only trigger once
   #pragma unroll
   for(int i = 0; i < 2; i += block_dimension_x) {
     #pragma unroll
@@ -223,60 +224,55 @@ __global__ void update_strategies(const long long seed, const int number_of_prev
 
 	INT2_T __me = checkerboard_agents[row * number_of_columns + col];
 
-
 	INT2_T __up = shared_tiles[    tidy][1 + tidx];
-	INT2_T __ct[1][1];
-	INT2_T __dw[1][1];
-
-	__ct[0][0] = shared_tiles[1 + tidy][1 + tidx];
-	__dw[0][0] = shared_tiles[2 + tidy][1 + tidx];
+	INT2_T __ct = shared_tiles[1 + tidy][1 + tidx];
+	INT2_T __dw = shared_tiles[2 + tidy][1 + tidx];
 
 
 	// BLOCK_DIMENSION_Y is power of two so row parity won't change across loops
 	const int read_black = (COLOR == C_BLACK) ? !(row % 2) : (row % 2);
 
-	INT2_T __sd[1][1];
-	__sd[0][0] = (read_black) ? shared_tiles[1 + tidy][tidx] : shared_tiles[1 + tidy][2 + tidx];
+	INT2_T __sd = (read_black) ? shared_tiles[1 + tidy][tidx] : shared_tiles[1 + tidy][2 + tidx];
 
 
 	if (read_black) {
-  	__sd[0][0].x = (__ct[0][0].x << BITXSPIN) | (__sd[0][0].y >> (8*sizeof(__sd[0][0].y)-BITXSPIN));
-  	__sd[0][0].y = (__ct[0][0].y << BITXSPIN) | (__ct[0][0].x >> (8*sizeof(__ct[0][0].x)-BITXSPIN));
+  	__sd.x = (__ct.x << BITXSPIN) | (__sd.y >> (8 * sizeof(__sd.y) - BITXSPIN));
+  	__sd.y = (__ct.y << BITXSPIN) | (__ct.x >> (8 * sizeof(__ct.x) - BITXSPIN));
 	} else {
-		__sd[0][0].y = (__ct[0][0].y >> BITXSPIN) | (__sd[0][0].x << (8*sizeof(__sd[0][0].x)-BITXSPIN));
-		__sd[0][0].x = (__ct[0][0].x >> BITXSPIN) | (__ct[0][0].y << (8*sizeof(__ct[0][0].y)-BITXSPIN));
+		__sd.y = (__ct.y >> BITXSPIN) | (__sd.x << (8 * sizeof(__sd.x) - BITXSPIN));
+		__sd.x = (__ct.x >> BITXSPIN) | (__ct.y << (8 * sizeof(__ct.y) - BITXSPIN));
 	}
 
 	curandStatePhilox4_32_10_t rng;
 	curand_init(seed, thread_id, static_cast<long long>(2 * SPIN_X_WORD) * (2 * number_of_previous_iterations + COLOR), &rng);
 
-	__ct[0][0].x += __up[0][0].x;
-	__dw[0][0].x += __sd[0][0].x;
-	__ct[0][0].x += __dw[0][0].x;
+	__ct.x += __up.x;
+	__dw.x += __sd.x;
+	__ct.x += __dw.x;
 
-	__ct[0][0].y += __up[0][0].y;
-	__dw[0][0].y += __sd[0][0].y;
-	__ct[0][0].y += __dw[0][0].y;
+	__ct.y += __up.y;
+	__dw.y += __sd.y;
+	__ct.y += __dw.y;
 
 	for(int z = 0; z < 8 * sizeof(INT_T); z += BITXSPIN) {
 
-		const int2 __src = make_int2((__me[0][0].x >> z) & 0xF,
-					     (__me[0][0].y >> z) & 0xF);
+		const int2 __src = make_int2((__me.x >> z) & 0xF,
+					     (__me.y >> z) & 0xF);
 
-		const int2 __sum = make_int2((__ct[0][0].x >> z) & 0xF,
-					     (__ct[0][0].y >> z) & 0xF);
+		const int2 __sum = make_int2((__ct.x >> z) & 0xF,
+					     (__ct.y >> z) & 0xF);
 
 		const INT_T ONE = static_cast<INT_T>(1);
 
 		if (curand_uniform(&rng) <= __shared_probabilities[__src.x][__sum.x]) {
-			__me[0][0].x ^= ONE << z;
+			__me.x ^= ONE << z;
 		}
 		if (curand_uniform(&rng) <= __shared_probabilities[__src.y][__sum.y]) {
-			__me[0][0].y ^= ONE << z;
+			__me.y ^= ONE << z;
 		}
 	}
 
-	checkerboard_agents[row * number_of_columns + col] = __me[0][0];
+	checkerboard_agents[row * number_of_columns + col] = __me;
 
 	return;
 }
