@@ -23,33 +23,26 @@
  */
 
 #include <stdio.h>
-#include <cuda_runtime.h>
 #include <curand_kernel.h>
-#include "cudamacro.h" /* for time() */
-#include "utils.h"
+#include "cudamacro.h"
 
 #define DIV_UP(a,b)     (((a)+((b)-1))/(b))
-
-#define THREADS  128
-
-#define BIT_X_SPIN (4)
-
-#define CRIT_TEMP	(2.26918531421f)
-#define	ALPHA_DEF	(0.1f)
-#define MIN_TEMP	(0.05f*CRIT_TEMP)
-
 #define MIN(a,b)	(((a)<(b))?(a):(b))
 #define MAX(a,b)	(((a)>(b))?(a):(b))
 
-// 2048+: 16, 16, 2, 1
-//  1024: 16, 16, 1, 2
-//   512:  8,  8, 1, 1
-//   256:  4,  8, 1, 1
-//   128:  2,  8, 1, 1
+#define THREADS  128
+#define BIT_X_SPIN (4)
 
+/*
+ * 2048+: 16, 16, 2, 1
+ *  1024: 16, 16, 1, 2
+ *   512:  8,  8, 1, 1
+ *   256:  4,  8, 1, 1
+ *   128:  2,  8, 1, 1
+*/
 #define BLOCK_DIMENSION_X_DEFINE (16)
 #define BLOCK_DIMENSION_Y_DEFINE (16)
-#define BMULT_X (2)
+#define BMULT_X (1)
 #define BMULT_Y (1)
 
 #define TOTAL_UPDATES_DEFAULT (10000)
@@ -68,65 +61,39 @@ __device__ __forceinline__ uint2 __mymake_int2(const unsigned int x, const unsig
 __device__ __forceinline__ ulonglong2 __mymake_int2(const unsigned long long x, const unsigned long long y) {return make_ulonglong2(x, y);}
 
 
-template<int BLOCK_DIMENSION_X, int BLOCK_DIMENSION_Y, int LOOP_X, int LOOP_Y, int BITXSPIN, int COLOR,
-         typename INT_T, typename INT2_T>
+template<int BLOCK_DIMENSION_X, int BLOCK_DIMENSION_Y, int BITXSPIN, int COLOR, typename INT_T, typename INT2_T>
 __global__  void initialise_traders(const long long seed, const long long number_of_columns, INT2_T *__restrict__ traders)
 {
-	const int row = blockIdx.y * BLOCK_DIMENSION_Y * LOOP_Y + threadIdx.y;
-	const int col = blockIdx.x * BLOCK_DIMENSION_X * LOOP_X + threadIdx.x;
-
+	const int row = blockIdx.y * BLOCK_DIMENSION_Y + threadIdx.y;
+	const int col = blockIdx.x * BLOCK_DIMENSION_X + threadIdx.x;
+  const int index = row * number_of_columns + col;
 	const int SPIN_X_WORD = 8 * sizeof(INT_T) / BITXSPIN;
 
 	const long long thread_id = ((gridDim.y + blockIdx.y) * gridDim.x + blockIdx.x) * BLOCK_DIMENSION_X * BLOCK_DIMENSION_Y +
 	                              threadIdx.y * BLOCK_DIMENSION_X + threadIdx.x;
 
 	curandStatePhilox4_32_10_t rng;
-	curand_init(seed, thread_id, static_cast<long long>(2 * SPIN_X_WORD) * LOOP_X * LOOP_Y * COLOR, &rng);
+	curand_init(seed, thread_id, static_cast<long long>(2 * SPIN_X_WORD) * COLOR, &rng);
 
-  // fill temporary 2d-array with 2d-vectors where both components are 0
-	INT2_T __tmp[LOOP_Y][LOOP_X];
-	#pragma unroll
-	for(int i = 0; i < LOOP_Y; i++) {
-		#pragma unroll
-		for(int j = 0; j < LOOP_X; j++) {
-			__tmp[i][j] = __mymake_int2(INT_T(0),INT_T(0));
+  traders[index] = __mymake_int2(INT_T(0),INT_T(0));
+	for(int bit_position = 0; bit_position < 8 * sizeof(INT_T); bit_position += BITXSPIN) {
+		// These two if clauses are not identical since curand_uniform()
+		// returns a different number on each invokation
+		if (curand_uniform(&rng) < 0.5f) {
+      /*
+       * shift the spin with value 1 to its respective position and then
+       * assign the matching bit the value 1 by using the bitwise
+       * logical or operator |=
+       * shift: 0000000000000000001 -> 0000000000010000000
+       * logical bitwise or with tmp:
+       * tmp[i][j] =                0000000000000001000
+       * INT_T(1) << bit_position = 0000000000010000000
+       * =>  tmp[i][j] =            0000000000010001000
+       */
+			traders[index].x |= INT_T(1) << bit_position;
 		}
-	}
-
-	#pragma unroll
-	for(int i = 0; i < LOOP_Y; i++) {
-		#pragma unroll
-		for(int j = 0; j < LOOP_X; j++) {
-			#pragma unroll
-			for(int bit_position = 0; bit_position < 8 * sizeof(INT_T); bit_position += BITXSPIN) {
-				// These two if clauses are not identical since curand_uniform()
-				// returns a different number on each invokation
-				if (curand_uniform(&rng) < 0.5f) {
-          /*
-           * shift the spin with value 1 to its respective position and then
-           * assign the matching bit the value 1 by using the bitwise
-           * logical or operator |=
-           * shift: 0000000000000000001 -> 0000000000010000000
-           * logical bitwise or with tmp:
-           * tmp[i][j] =                0000000000000001000
-           * INT_T(1) << bit_position = 0000000000010000000
-           * =>  tmp[i][j] =            0000000000010001000
-           */
-					__tmp[i][j].x |= INT_T(1) << bit_position;
-				}
-				if (curand_uniform(&rng) < 0.5f) {
-					__tmp[i][j].y |= INT_T(1) << bit_position;
-				}
-			}
-		}
-	}
-
-	#pragma unroll
-	for(int i = 0; i < LOOP_Y; i++) {
-		#pragma unroll
-		for(int j = 0; j < LOOP_X; j++) {
-      // copy temporary elements to their respective positions in the destination array
-			traders[(row + i * BLOCK_DIMENSION_Y) * number_of_columns + col + j * BLOCK_DIMENSION_X] = __tmp[i][j];
+		if (curand_uniform(&rng) < 0.5f) {
+			traders[index].y |= INT_T(1) << bit_position;
 		}
 	}
 	return;
@@ -468,12 +435,12 @@ int main(int argc, char **argv) {
 	int XSL = grid_width;
 	int YSL = grid_height;
 
-	if (!grid_width || (grid_width % 2) || ((grid_width / 2) % (SPIN_X_WORD * 2 * BLOCK_DIMENSION_X_DEFINE * BMULT_X))) {
-		fprintf(stderr, "\nPlease specify an grid_width dim multiple of %d\n\n", 2 * SPIN_X_WORD * 2 * BLOCK_DIMENSION_X_DEFINE * BMULT_X);
+	if (!grid_width || (grid_width % 2) || ((grid_width / 2) % (SPIN_X_WORD * 2 * BLOCK_DIMENSION_X_DEFINE))) {
+		fprintf(stderr, "\nPlease specify an grid_width dim multiple of %d\n\n", 2 * SPIN_X_WORD * 2 * BLOCK_DIMENSION_X_DEFINE);
 		exit(EXIT_FAILURE);
 	}
-	if (!grid_height || (grid_height % (BLOCK_DIMENSION_Y_DEFINE * BMULT_Y))) {
-		fprintf(stderr, "\nPlease specify a grid_height dim multiple of %d\n\n", BLOCK_DIMENSION_Y_DEFINE * BMULT_Y);
+	if (!grid_height || (grid_height % (BLOCK_DIMENSION_Y_DEFINE))) {
+		fprintf(stderr, "\nPlease specify a grid_height dim multiple of %d\n\n", BLOCK_DIMENSION_Y_DEFINE);
 		exit(EXIT_FAILURE);
 	}
 
@@ -494,7 +461,7 @@ int main(int argc, char **argv) {
 	// total lattice length
 	size_t total_length = 2ull * static_cast<size_t>(grid_height) * words_per_row;
 
-	dim3 grid(DIV_UP(words_per_row / 2, BLOCK_DIMENSION_X_DEFINE * BMULT_X), DIV_UP(grid_height, BLOCK_DIMENSION_Y_DEFINE * BMULT_Y));
+	dim3 grid(DIV_UP(words_per_row / 2, BLOCK_DIMENSION_X_DEFINE), DIV_UP(grid_height, BLOCK_DIMENSION_Y_DEFINE));
 	dim3 block(BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE);
 
 	printf("Run configuration:\n");
@@ -503,10 +470,10 @@ int main(int argc, char **argv) {
 	printf("\tseed: %llu\n", seed);
 	printf("\titerations: %d\n", total_updates);
 	printf("\tblock (x, y): %d, %d\n", block.x, block.y);
-	printf("\ttile  (x, y): %d, %d\n", BLOCK_DIMENSION_X_DEFINE * BMULT_X, BLOCK_DIMENSION_Y_DEFINE * BMULT_Y);
+	printf("\ttile  (x, y): %d, %d\n", BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE);
 	printf("\tgrid  (x, y): %d, %d\n", grid.x, grid.y);
 
-	printf("\ttemp: %f (%f*T_crit)\n", temp, temp / CRIT_TEMP);
+	printf("\ttemp: %f \n", temp);
 
 	printf("\n");
 
@@ -557,12 +524,12 @@ int main(int argc, char **argv) {
 	CHECK_CUDA(cudaEventCreate(&stop));
 
 	CHECK_CUDA(cudaSetDevice(0));
-	initialise_traders<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BMULT_X, BMULT_Y, BIT_X_SPIN, C_BLACK, unsigned long long>
+	initialise_traders<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_BLACK, unsigned long long>
 	<<<grid, block>>>
 	(seed, words_per_row / 2, reinterpret_cast<ulonglong2 *>(d_black_tiles));
 	CHECK_ERROR("initialise_traders");
 
-	initialise_traders<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BMULT_X, BMULT_Y, BIT_X_SPIN, C_WHITE, unsigned long long>
+	initialise_traders<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_WHITE, unsigned long long>
 	<<<grid, block>>>
 	(seed, words_per_row / 2, reinterpret_cast<ulonglong2 *>(d_white_tiles));
 	CHECK_ERROR("initialise_traders");
