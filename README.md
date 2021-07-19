@@ -1,5 +1,7 @@
 # <img src="images/logo.png" height="100" alt="logo">
 
+<img src="images/license.svg" alt="MIT License">
+
 ## Outline
 
 This particular model attempts to predict the behavior of traders in a market
