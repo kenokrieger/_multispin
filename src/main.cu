@@ -161,22 +161,23 @@ __global__ void update_strategies(const long long seed, const int number_of_prev
 		       const int grid_height, // lattice height (not in words)
 		       const long long number_of_columns,
 		       const float precomputed_probabilities[][5],
-		       const INT2_T *__restrict__ traders,
-		             INT2_T *__restrict__ checkerboard_agents)
+		       const INT2_T *__restrict__ checkerboard_agents,
+		             INT2_T *__restrict__ traders)
 {
 	const int SPIN_X_WORD = 8 * sizeof(INT_T) / BITXSPIN;
-
+	const INT_T ONE = static_cast<INT_T>(1);
 	const int tidx = threadIdx.x;
 	const int tidy = threadIdx.y;
 
 	__shared__ INT2_T shared_tiles[BLOCK_DIMENSION_Y + 2][BLOCK_DIMENSION_X + 2];
 	load_tiles<BLOCK_DIMENSION_X, BLOCK_DIMENSION_Y, INT2_T>
-  (grid_width, grid_height, number_of_columns, traders, shared_tiles);
+  (grid_width, grid_height, number_of_columns, checkerboard_agents, shared_tiles);
 
-	__shared__ float __shared_probabilities[2][5];
-  load_probabilities(precomputed_probabilities, __shared_probabilities, BLOCK_DIMENSION_X, BLOCK_DIMENSION_Y, tidx, tidy);
+	__shared__ float shared_probabilities[2][5];
+  load_probabilities(precomputed_probabilities, shared_probabilities, BLOCK_DIMENSION_X, BLOCK_DIMENSION_Y, tidx, tidy);
 
 	__syncthreads();
+
 
 	const int row = blockIdx.y * BLOCK_DIMENSION_Y + tidy;
 	const int col = blockIdx.x * BLOCK_DIMENSION_X + tidx;
@@ -184,17 +185,16 @@ __global__ void update_strategies(const long long seed, const int number_of_prev
 	const long long thread_id = (blockIdx.y * gridDim.x + blockIdx.x) * BLOCK_DIMENSION_X * BLOCK_DIMENSION_Y
                             +  threadIdx.y * BLOCK_DIMENSION_X + threadIdx.x;
 
-	INT2_T __me = checkerboard_agents[row * number_of_columns + col];
+	INT2_T target = traders[row * number_of_columns + col];
 
+	// three nearest neighbors
 	INT2_T __up = shared_tiles[    tidy][1 + tidx];
 	INT2_T __ct = shared_tiles[1 + tidy][1 + tidx];
 	INT2_T __dw = shared_tiles[2 + tidy][1 + tidx];
-
 	// BLOCK_DIMENSION_Y is power of two so row parity won't change across loops
 	const int read_black = (COLOR == C_BLACK) ? !(row % 2) : (row % 2);
-
+	// remaining neighbor
 	INT2_T __sd = (read_black) ? shared_tiles[1 + tidy][tidx] : shared_tiles[1 + tidy][2 + tidx];
-
 
 	if (read_black) {
   	__sd.x = (__ct.x << BITXSPIN) | (__sd.y >> (8 * sizeof(__sd.y) - BITXSPIN));
@@ -217,23 +217,18 @@ __global__ void update_strategies(const long long seed, const int number_of_prev
 
 	for(int z = 0; z < 8 * sizeof(INT_T); z += BITXSPIN) {
 
-		const int2 __src = make_int2((__me.x >> z) & 0xF,
-					     (__me.y >> z) & 0xF);
+		const int2 __src = make_int2((target.x >> z) & 0xF, (target.y >> z) & 0xF);
+		const int2 __sum = make_int2((__ct.x >> z) & 0xF, (__ct.y >> z) & 0xF);
 
-		const int2 __sum = make_int2((__ct.x >> z) & 0xF,
-					     (__ct.y >> z) & 0xF);
-
-		const INT_T ONE = static_cast<INT_T>(1);
-
-		if (curand_uniform(&rng) <= __shared_probabilities[__src.x][__sum.x]) {
-			__me.x ^= ONE << z;
+		if (curand_uniform(&rng) <= shared_probabilities[__src.x][__sum.x]) {
+			target.x ^= ONE << z;
 		}
-		if (curand_uniform(&rng) <= __shared_probabilities[__src.y][__sum.y]) {
-			__me.y ^= ONE << z;
+		if (curand_uniform(&rng) <= shared_probabilities[__src.y][__sum.y]) {
+			target.y ^= ONE << z;
 		}
 	}
 
-	checkerboard_agents[row * number_of_columns + col] = __me;
+	traders[row * number_of_columns + col] = target;
 
 	return;
 }
@@ -391,8 +386,7 @@ int main(int argc, char **argv) {
 	printf("\tlattice shape: 2 x %8d x %8zu (%12zu %s)\n", grid_height, words_per_row, total_words, sizeof(*d_spins) == 4 ? "uints" : "ulls");
 	printf("\tmemory: %.2lf MB \n", (total_words * sizeof(*d_spins)) / (1024.0 * 1024.0));
 
-	const int redBlocks = MIN(DIV_UP(total_words, THREADS),
-				  (props.maxThreadsPerMultiProcessor/THREADS)*props.multiProcessorCount);
+	const int redBlocks = MIN(DIV_UP(total_words, THREADS), (props.maxThreadsPerMultiProcessor / THREADS) * props.multiProcessorCount);
 
 	unsigned long long cntPos;
 	unsigned long long cntNeg;
@@ -428,7 +422,6 @@ int main(int argc, char **argv) {
 	CHECK_CUDA(cudaSetDevice(0));
 	CHECK_CUDA(cudaMalloc(exp_d, 2 * 5 * sizeof(**exp_d)));
 	CHECK_CUDA(cudaMemcpy(exp_d[0], exp_h, 2 * 5 * sizeof(**exp_d), cudaMemcpyHostToDevice));
-
 
 	CHECK_CUDA(cudaEventCreate(&start));
 	CHECK_CUDA(cudaEventCreate(&stop));
@@ -492,8 +485,6 @@ int main(int argc, char **argv) {
 			+ sizeof(*exp_d) * 5 * blocks.x * blocks.y ) * 1.0E-9) / (elapsed_time / 1.0E+3));
 
 	CHECK_CUDA(cudaFree(d_spins));
-
-
 	CHECK_CUDA(cudaFree(exp_d[0]));
 	CHECK_CUDA(cudaFree(sum_d[0]));
 
