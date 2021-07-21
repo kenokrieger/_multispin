@@ -73,8 +73,39 @@ traders[index] = random_values[index] < probability ? 1 : -1;
 
 ### Multispin Coding Approach
 
-One very efficient coding technique when dealing with large arrays containing
-binary values is the so called multispin-coding. Instead of using numbers or
-boolean values to represent each individual spin, multiple spins are stored
-inside of one computer word. Using logical binary operators one can evaluate
-multiple spins at once making this method very time efficient.
+Multispin coding stores spin values in individual bits rather than full bytes leading to more efficient memory usage and thus faster computation times.
+The spin values are mapped from (-1, 1) to the binary tuple (0, 1). This
+allows for each spin to be resembled by an individual bit. An unsigned long
+long (with size of 64 bits), for example, can store 16 spins. The remaining
+bits are left untouched to enable a fast computation of the nearest neighbors
+sum. Lets look at a simplified example of storing two spins in a 8 bit
+variable:
+
+The tuple of source spins is represented by 00010001 with nearest neighbors
+00000000, 00010000, 00000000, 00000001. In this example we are dealing with two spins in parallel. To compute the nearest neighbors sum it is sufficient
+to simply add all four values and look at the resulting bits.
+
+- 00000000 =  0
+- 00010000 = 16
+- 00000000 = 0
+- 00000001 = 1
+
+The sum over all neighbors thus equals 17.
+
+- 17 = 00010001
+
+To find the number of neighbors with spin up for each individual spin, one
+only needs to look at the 4 bits allocated for the storage of the spin. In
+this example both spins have one neighbor with spin up.
+
+## Compiling
+
+### On Ubuntu/Linux
+
+To compile and run the executable you need to have a system with a CUDA-capable
+GPU. Additionaly you need to install the cuda-toolkit as well as suitable
+C/C++ compiler (e.g. gcc). If everything is set up correctly you should be able
+produce the executable with the `make` command.
+
+**Note:** You may need to adjust the `-arch` option in the Makefile according
+to the compute capabilities of your GPU.

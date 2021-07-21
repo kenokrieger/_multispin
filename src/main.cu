@@ -1,4 +1,5 @@
 /*
+ * Copyright (c) 2021, Keno Krieger, <kriegerk@uni-bremen.de>. All rights reserved.
  * Copyright (c) 2019, NVIDIA CORPORATION. All rights reserved.
  *
  * Mauro Bisson <maurob@nvidia.com>
@@ -26,11 +27,11 @@
 #include <curand_kernel.h>
 #include "cudamacro.h"
 
-#define DIV_UP(a,b)  (((a)+((b)-1))/(b))
-#define MIN(a,b)	(((a)<(b))?(a):(b))
-#define MAX(a,b)	(((a)>(b))?(a):(b))
+#define DIV_UP(a,b)  (((a) + ((b) - 1)) / (b))
+#define MIN(a,b)	(((a) < (b)) ? (a) : (b))
+#define MAX(a,b)	(((a) > (b)) ? (a) : (b))
 
-#define THREADS  128
+#define THREADS 128
 #define BIT_X_SPIN (4)
 
 /*
@@ -47,16 +48,16 @@
 #define SEED_DEFAULT  (463463564571ull)
 
 
-__device__ __forceinline__ unsigned int __mypopc(const unsigned int x) {return __popc(x);}
+__device__ __forceinline__ unsigned int __custom_popc(const unsigned int x) {return __popc(x);}
 
-__device__ __forceinline__ unsigned long long int __mypopc(const unsigned long long int x) {return __popcll(x);}
+__device__ __forceinline__ unsigned long long int __custom_popc(const unsigned long long int x) {return __popcll(x);}
 
 enum {C_BLACK, C_WHITE};
 
 // creates a vector with two components
-__device__ __forceinline__ uint2 __mymake_int2(const unsigned int x, const unsigned int y) {return make_uint2(x, y);}
+__device__ __forceinline__ uint2 __custom_make_int2(const unsigned int x, const unsigned int y) {return make_uint2(x, y);}
 
-__device__ __forceinline__ ulonglong2 __mymake_int2(const unsigned long long x, const unsigned long long y) {return make_ulonglong2(x, y);}
+__device__ __forceinline__ ulonglong2 __custom_make_int2(const unsigned long long x, const unsigned long long y) {return make_ulonglong2(x, y);}
 
 
 template<int BLOCK_DIMENSION_X, int BLOCK_DIMENSION_Y, int BITXSPIN, int COLOR, typename INT_T, typename INT2_T>
@@ -73,7 +74,7 @@ __global__  void initialise_traders(const long long seed, const long long number
 	curandStatePhilox4_32_10_t rng;
 	curand_init(seed, thread_id, static_cast<long long>(2 * SPIN_X_WORD) * COLOR, &rng);
 
-  traders[index] = __mymake_int2(INT_T(0), INT_T(0));
+  traders[index] = __custom_make_int2(INT_T(0), INT_T(0));
 	for(int bit_position = 0; bit_position < 8 * sizeof(INT_T); bit_position += BITXSPIN) {
 		// These two if clauses are not identical since curand_uniform()
 		// returns a different number on each invokation
@@ -102,7 +103,7 @@ template<int TILE_SIZE_X, int TILE_SIZE_Y, typename INT2_T>
 __device__ void load_tiles(const int grid_width, const int grid_height, const long long number_of_columns,
                            const INT2_T *__restrict__ traders, INT2_T tile[][TILE_SIZE_X + 2])
     /*
-    Each block works on one tile with shape (TILE_SIZE_X, TILE_SIZE_Y).
+    Each threads_per_block works on one tile with shape (TILE_SIZE_X, TILE_SIZE_Y).
     */
 {
 	const int tidx = threadIdx.x;
@@ -138,7 +139,7 @@ __device__ void load_probabilities(const float precomputed_probabilities[][5], f
                                    const int tidx, const int tidy)
 {
   // load precomputed exponentials into shared memory.
-  // in case a block consists of less than 2 * 5 threads
+  // in case a threads_per_block consists of less than 2 * 5 threads
   // multiple iterations in each thread are needed
   // otherwise loops will only trigger once
   #pragma unroll
@@ -188,7 +189,6 @@ __global__ void update_strategies(const long long seed, const int number_of_prev
 	INT2_T __up = shared_tiles[    tidy][1 + tidx];
 	INT2_T __ct = shared_tiles[1 + tidy][1 + tidx];
 	INT2_T __dw = shared_tiles[2 + tidy][1 + tidx];
-
 
 	// BLOCK_DIMENSION_Y is power of two so row parity won't change across loops
 	const int read_black = (COLOR == C_BLACK) ? !(row % 2) : (row % 2);
@@ -283,7 +283,7 @@ __global__ void getMagn_k(const long long n,
 
 	for(long long i = 0; i < n; i += nth) {
 		if (i+thread_id < n) {
-			const int __c = __mypopc(traders[i+thread_id]);
+			const int __c = __custom_popc(traders[i+thread_id]);
 			__cntP += __c;
 			__cntN += SPIN_X_WORD - __c;
 		}
@@ -344,9 +344,6 @@ int main(int argc, char **argv) {
 
 	float temp  = 0.666f;
 
-	int XSL = grid_width;
-	int YSL = grid_height;
-
 	if (!grid_width || (grid_width % 2) || ((grid_width / 2) % (SPIN_X_WORD * 2 * BLOCK_DIMENSION_X_DEFINE))) {
 		fprintf(stderr, "\nPlease specify an grid_width dim multiple of %d\n\n", 2 * SPIN_X_WORD * 2 * BLOCK_DIMENSION_X_DEFINE);
 		exit(EXIT_FAILURE);
@@ -374,17 +371,17 @@ int main(int argc, char **argv) {
 	size_t total_words = 2ull * static_cast<size_t>(grid_height) * words_per_row;
 
 	// words_per_row / 2 because each entry in the array has two components
-	dim3 grid(DIV_UP(words_per_row / 2, BLOCK_DIMENSION_X_DEFINE), DIV_UP(grid_height, BLOCK_DIMENSION_Y_DEFINE));
-	dim3 block(BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE);
+	dim3 blocks(DIV_UP(words_per_row / 2, BLOCK_DIMENSION_X_DEFINE), DIV_UP(grid_height, BLOCK_DIMENSION_Y_DEFINE));
+	dim3 threads_per_block(BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE);
 
 	printf("Run configuration:\n");
 	printf("\tspin/word: %d\n", SPIN_X_WORD);
 	printf("\tspins: %zu\n", total_words * SPIN_X_WORD);
 	printf("\tseed: %llu\n", seed);
 	printf("\titerations: %d\n", total_updates);
-	printf("\tblock (x, y): %d, %d\n", block.x, block.y);
+	printf("\tblock (x, y): %d, %d\n", threads_per_block.x, threads_per_block.y);
 	printf("\ttile  (x, y): %d, %d\n", BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE);
-	printf("\tgrid  (x, y): %d, %d\n", grid.x, grid.y);
+	printf("\tgrid  (x, y): %d, %d\n", blocks.x, blocks.y);
 
 	printf("\ttemp: %f \n", temp);
 
@@ -438,12 +435,12 @@ int main(int argc, char **argv) {
 
 	CHECK_CUDA(cudaSetDevice(0));
 	initialise_traders<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_BLACK, unsigned long long>
-	<<<grid, block>>>
+	<<<blocks, threads_per_block>>>
 	(seed, words_per_row / 2, reinterpret_cast<ulonglong2 *>(d_black_tiles));
 	CHECK_ERROR("initialise_traders");
 
 	initialise_traders<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_WHITE, unsigned long long>
-	<<<grid, block>>>
+	<<<blocks, threads_per_block>>>
 	(seed, words_per_row / 2, reinterpret_cast<ulonglong2 *>(d_white_tiles));
 	CHECK_ERROR("initialise_traders");
 
@@ -463,16 +460,16 @@ int main(int argc, char **argv) {
 
 		CHECK_CUDA(cudaSetDevice(0));
 		update_strategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_BLACK, unsigned long long>
-		<<<grid, block>>>
-		(seed, iteration + 1, (XSL / 2) / SPIN_X_WORD / 2, YSL, words_per_row / 2,
+		<<<blocks, threads_per_block>>>
+		(seed, iteration + 1, (grid_width / 2) / SPIN_X_WORD / 2, grid_height, words_per_row / 2,
 		 reinterpret_cast<float (*)[5]>(exp_d[0]),
 		 reinterpret_cast<ulonglong2 *>(d_white_tiles),
 		 reinterpret_cast<ulonglong2 *>(d_black_tiles));
 
 		CHECK_CUDA(cudaSetDevice(0));
 		update_strategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_WHITE, unsigned long long>
-		<<<grid, block>>>
-		(seed, iteration + 1, (XSL / 2) / SPIN_X_WORD / 2, YSL, words_per_row / 2,
+		<<<blocks, threads_per_block>>>
+		(seed, iteration + 1, (grid_width / 2) / SPIN_X_WORD / 2, grid_height, words_per_row / 2,
 		 reinterpret_cast<float (*)[5]>(exp_d[0]),
 		 reinterpret_cast<ulonglong2 *>(d_black_tiles),
 		 reinterpret_cast<ulonglong2 *>(d_white_tiles));
@@ -492,7 +489,7 @@ int main(int argc, char **argv) {
 		iteration, elapsed_time, static_cast<double>(total_words * SPIN_X_WORD) * iteration / (elapsed_time * 1.0E+6),
 		(2ull * iteration * (
 			  sizeof(*d_spins)*((total_words / 2) + (total_words / 2) + (total_words / 2))  // src color read, dst color read, dst color write
-			+ sizeof(*exp_d) * 5 * grid.x * grid.y ) * 1.0E-9) / (elapsed_time / 1.0E+3));
+			+ sizeof(*exp_d) * 5 * blocks.x * blocks.y ) * 1.0E-9) / (elapsed_time / 1.0E+3));
 
 	CHECK_CUDA(cudaFree(d_spins));
 
