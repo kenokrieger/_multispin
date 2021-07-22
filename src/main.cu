@@ -76,7 +76,7 @@ __global__  void initialise_traders(const long long seed, const long long number
 
   traders[index] = __custom_make_int2(INT_T(0), INT_T(0));
 	for(int bit_position = 0; bit_position < 8 * sizeof(INT_T); bit_position += BITXSPIN) {
-		// These two if clauses are not identical since curand_uniform()
+		// The two if clauses are not identical since curand_uniform()
 		// returns a different number on each invokation
     /*
      * shift the spin with value 1 to its respective position and then
@@ -103,7 +103,7 @@ template<int TILE_SIZE_X, int TILE_SIZE_Y, typename INT2_T>
 __device__ void load_tiles(const int grid_width, const int grid_height, const long long number_of_columns,
                            const INT2_T *__restrict__ traders, INT2_T tile[][TILE_SIZE_X + 2])
     /*
-    Each threads_per_block works on one tile with shape (TILE_SIZE_X, TILE_SIZE_Y).
+    Each threads_per_block works on one tile with shape (TILE_SIZE_Y + 2, TILE_SIZE_X + 2).
     */
 {
 	const int tidx = threadIdx.x;
@@ -119,11 +119,12 @@ __device__ void load_tiles(const int grid_width, const int grid_height, const lo
 	if (tidy == 0) {
 		row = (tile_start_y % grid_height) == 0 ? tile_start_y + grid_height - 1 : tile_start_y - 1;
 		tile[0][1 + tidx] = traders[row * number_of_columns + col];
+
 		row = ((tile_start_y + TILE_SIZE_Y) % grid_height) == 0 ? tile_start_y + TILE_SIZE_Y - grid_height : tile_start_y + TILE_SIZE_Y;
 		tile[1 + TILE_SIZE_Y][1 + tidx] = traders[row * number_of_columns + col];
 
-		col = (tile_start_x % grid_width) == 0 ? tile_start_x + grid_width - 1 : tile_start_x - 1;
 		row = tile_start_y + tidx;
+		col = (tile_start_x % grid_width) == 0 ? tile_start_x + grid_width - 1 : tile_start_x - 1;
 		tile[1 + tidx][0] = traders[row * number_of_columns + col];
 
 		row = tile_start_y + tidx;
