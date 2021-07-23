@@ -75,7 +75,7 @@ __global__  void initialise_traders(const long long seed, const long long number
 	curand_init(seed, thread_id, static_cast<long long>(2 * SPIN_X_WORD) * COLOR, &rng);
 
   traders[index] = __custom_make_int2(INT_T(0), INT_T(0));
-	for(int bit_position = 0; bit_position < 8 * sizeof(INT_T); bit_position += BITXSPIN) {
+	for(int spin_position = 0; spin_position < 8 * sizeof(INT_T); spin_position += BITXSPIN) {
 		// The two if clauses are not identical since curand_uniform()
 		// returns a different number on each invokation
     /*
@@ -85,14 +85,14 @@ __global__  void initialise_traders(const long long seed, const long long number
      * shift: 0000000000000000001 -> 0000000000010000000
      * logical bitwise or with traders:
      * traders =                  0000000000000001000
-     * INT_T(1) << bit_position = 0000000000010000000
+     * INT_T(1) << spin_position = 0000000000010000000
      * =>  traders =              0000000000010001000
      */
 		if (curand_uniform(&rng) < 0.5f) {
-			traders[index].x |= INT_T(1) << bit_position;
+			traders[index].x |= INT_T(1) << spin_position;
 		}
 		if (curand_uniform(&rng) < 0.5f) {
-			traders[index].y |= INT_T(1) << bit_position;
+			traders[index].y |= INT_T(1) << spin_position;
 		}
 	}
 	return;
@@ -189,43 +189,41 @@ __global__ void update_strategies(const long long seed, const int number_of_prev
 	INT2_T target = traders[row * number_of_columns + col];
 
 	// three nearest neighbors
-	INT2_T __up = shared_tiles[    tidy][1 + tidx];
-	INT2_T __ct = shared_tiles[1 + tidy][1 + tidx];
-	INT2_T __dw = shared_tiles[2 + tidy][1 + tidx];
-	// BLOCK_DIMENSION_Y is power of two so row parity won't change across loops
-	const int read_black = (COLOR == C_BLACK) ? !(row % 2) : (row % 2);
-	// remaining neighbor
-	INT2_T __sd = (read_black) ? shared_tiles[1 + tidy][tidx] : shared_tiles[1 + tidy][2 + tidx];
+	INT2_T upper_neighbor = shared_tiles[    tidy][1 + tidx];
+	INT2_T center_neighbor = shared_tiles[1 + tidy][1 + tidx];
+	INT2_T lower_neighbor = shared_tiles[2 + tidy][1 + tidx];
 
-	if (read_black) {
-  	__sd.x = (__ct.x << BITXSPIN) | (__sd.y >> (8 * sizeof(__sd.y) - BITXSPIN));
-  	__sd.y = (__ct.y << BITXSPIN) | (__ct.x >> (8 * sizeof(__ct.x) - BITXSPIN));
+	const int shift_left = (COLOR == C_BLACK) ? !(row % 2) : (row % 2);
+	// remaining neighbor, either left or right
+	INT2_T horizontal_neighbor = (shift_left) ? shared_tiles[1 + tidy][tidx] : shared_tiles[1 + tidy][2 + tidx];
+
+	if (shift_left) {
+  	horizontal_neighbor.x = (center_neighbor.x << BITXSPIN) | (horizontal_neighbor.y >> (8 * sizeof(horizontal_neighbor.y) - BITXSPIN));
+  	horizontal_neighbor.y = (center_neighbor.y << BITXSPIN) | (center_neighbor.x >> (8 * sizeof(center_neighbor.x) - BITXSPIN));
 	} else {
-		__sd.y = (__ct.y >> BITXSPIN) | (__sd.x << (8 * sizeof(__sd.x) - BITXSPIN));
-		__sd.x = (__ct.x >> BITXSPIN) | (__ct.y << (8 * sizeof(__ct.y) - BITXSPIN));
+		horizontal_neighbor.y = (center_neighbor.y >> BITXSPIN) | (horizontal_neighbor.x << (8 * sizeof(horizontal_neighbor.x) - BITXSPIN));
+		horizontal_neighbor.x = (center_neighbor.x >> BITXSPIN) | (center_neighbor.y << (8 * sizeof(center_neighbor.y) - BITXSPIN));
 	}
 
 	curandStatePhilox4_32_10_t rng;
 	curand_init(seed, thread_id, static_cast<long long>(2 * SPIN_X_WORD) * (2 * number_of_previous_iterations + COLOR), &rng);
 
-	__ct.x += __up.x;
-	__dw.x += __sd.x;
-	__ct.x += __dw.x;
+	// this basically sums over all spins/word in parallel
+	center_neighbor.x += upper_neighbor.x + lower_neighbor.x + horizontal_neighbor.x;
+	center_neighbor.y += upper_neighbor + lower_neighbor.y + horizontal_neighbor.y;
 
-	__ct.y += __up.y;
-	__dw.y += __sd.y;
-	__ct.y += __dw.y;
+	for(int spin_position = 0; spin_position < 8 * sizeof(INT_T); spin_position += BITXSPIN) {
 
-	for(int z = 0; z < 8 * sizeof(INT_T); z += BITXSPIN) {
+		// convert binary values to hexadecimal values, basically mapping 0, 2, 4, 6, 8
+		// onto 0, 1, 2, 3, 4 for easier array access
+		const int2 source = make_int2((target.x >> spin_position) & 0xF, (target.y >> spin_position) & 0xF);
+		const int2 sum = make_int2((center_neighbor.x >> spin_position) & 0xF, (center_neighbor.y >> spin_position) & 0xF);
 
-		const int2 __src = make_int2((target.x >> z) & 0xF, (target.y >> z) & 0xF);
-		const int2 __sum = make_int2((__ct.x >> z) & 0xF, (__ct.y >> z) & 0xF);
-
-		if (curand_uniform(&rng) <= shared_probabilities[__src.x][__sum.x]) {
-			target.x ^= ONE << z;
+		if (curand_uniform(&rng) <= shared_probabilities[source.x][sum.x]) {
+			target.x |= ONE << spin_position;
 		}
-		if (curand_uniform(&rng) <= shared_probabilities[__src.y][__sum.y]) {
-			target.y ^= ONE << z;
+		if (curand_uniform(&rng) <= shared_probabilities[source.y][sum.y]) {
+			target.y |= ONE << spin_position;
 		}
 	}
 
@@ -340,7 +338,7 @@ int main(int argc, char **argv) {
 
 	float temp  = 0.666f;
 
-	if (!grid_width || (grid_width % 2) || ((grid_width / 2) % (SPIN_X_WORD * 2 * BLOCK_DIMENSION_X_DEFINE))) {
+	if (!grid_width || (grid_width % 2) || ((grid_width / 2) % (2 * SPIN_X_WORD * BLOCK_DIMENSION_X_DEFINE))) {
 		fprintf(stderr, "\nPlease specify an grid_width dim multiple of %d\n\n", 2 * SPIN_X_WORD * 2 * BLOCK_DIMENSION_X_DEFINE);
 		exit(EXIT_FAILURE);
 	}
@@ -438,7 +436,7 @@ int main(int argc, char **argv) {
 	(seed, words_per_row / 2, reinterpret_cast<ulonglong2 *>(d_white_tiles));
 	CHECK_ERROR("initialise_traders");
 
-	// computes sum over array
+	// compute sum over array
 	countSpins(redBlocks, total_words, d_black_tiles, d_white_tiles, sum_d, &cntPos, &cntNeg);
 	printf("\nInitial magnetization: %9.6lf, up_s: %12llu, dw_s: %12llu\n",
 	       abs(static_cast<double>(cntPos)-static_cast<double>(cntNeg)) / (total_words*SPIN_X_WORD),
