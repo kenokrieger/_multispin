@@ -210,7 +210,7 @@ __global__ void update_strategies(const long long seed, const int number_of_prev
 
 	// this basically sums over all spins/word in parallel
 	center_neighbor.x += upper_neighbor.x + lower_neighbor.x + horizontal_neighbor.x;
-	center_neighbor.y += upper_neighbor + lower_neighbor.y + horizontal_neighbor.y;
+	center_neighbor.y += upper_neighbor.y + lower_neighbor.y + horizontal_neighbor.y;
 
 	for(int spin_position = 0; spin_position < 8 * sizeof(INT_T); spin_position += BITXSPIN) {
 
