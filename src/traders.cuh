@@ -2,7 +2,13 @@
 #define traders_cuh
 
 #include <curand_kernel.h>
+#include "cudamacro.h"
+
 #define BIT_X_SPIN (4)
+#define THREADS 128
+
+#define BLOCK_DIMENSION_X_DEFINE (16)
+#define BLOCK_DIMENSION_Y_DEFINE (16)
 
 enum {C_BLACK, C_WHITE};
 
@@ -177,6 +183,53 @@ __global__ void update_strategies(const long long seed, const int number_of_prev
 }
 
 
+void precompute_probabilities(float* probabilities, const float market_coupling, const float reduced_j) {
+		double h_probabilities[2][7];
+
+		for (int spin = 0; spin < 2; spin++) {
+			for (int neighbor_sum = 0; neighbor_sum < 7; neighbor_sum++) {
+				double field = reduced_j * neighbor_sum + market_coupling * ((spin) ? 1 : -1);
+				h_probabilities[spin][neighbor_sum] = 1 / (1 + exp(field));
+			}
+		}
+
+		CHECK_CUDA(cudaMemcpy(h_probabilities, probabilities, 2 * 7 * sizeof(**h_probabilities), cudaMemcpyHostToDevice));
+		return;
+}
+
+/*
+int update(signed char *d_black_tiles,
+           signed char *d_white_tiles,
+           signed char *d_black_plus_white,
+           float* random_values,
+           float* d_probabilities,
+           curandGenerator_t rng,
+           const float reduced_alpha,
+           const float reduced_j,
+           const long long grid_height, const long long grid_width, const long long grid_depth,
+           int threads = 16)
+{
+		dim3 blocks(DIV_UP(words_per_row / 2, BLOCK_DIMENSION_X_DEFINE), DIV_UP(grid_height, BLOCK_DIMENSION_Y_DEFINE));
+		dim3 threads_per_block(BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE);
+
+    add_array<<<(grid_depth * grid_width / 2 * grid_height + 127) / 128, 128>>>(d_black_tiles, d_white_tiles, d_black_plus_white, grid_width / 2 * grid_height * grid_depth);
+    double global_market = sum_array(d_black_plus_white, grid_depth * grid_height * grid_width / 2);
+    float reduced_global_market = abs(global_market / (grid_width * grid_height * grid_depth));
+    float market_coupling = -reduced_alpha * reduced_global_market;
+    // precompute possible exponentials
+    compute_probabilities<<<1, 14>>>(d_probabilities, market_coupling, reduced_j);
+    CHECK_CUDA(cudaDeviceSynchronize());
+    //CHECK_CURAND(curandGenerateUniform(rng, random_values, grid_depth * grid_height * grid_width / 2));
+    update_strategies<true><<<blocks, threads_per_block>>>(d_black_tiles, d_white_tiles, random_values, d_probabilities, grid_height, grid_width / 2, grid_depth);
+
+    //CHECK_CURAND(curandGenerateUniform(rng, random_values, grid_depth * grid_height * grid_width / 2));
+    update_strategies<false><<<blocks, threads_per_block>>>(d_white_tiles, d_black_tiles, random_values, d_probabilities, grid_height, grid_width / 2, grid_depth);
+
+    return global_market;
+}
+*/
+
+
 template<int BLOCK_DIMENSION_X, int WSIZE, typename T>
 __device__ __forceinline__ T __block_sum(T traders)
 {
@@ -235,5 +288,32 @@ __global__ void getMagn_k(const long long n,
 	}
 	return;
 }
+
+
+static void countSpins(const int redBlocks,
+								       const size_t total_words,
+								       const unsigned long long *d_black_tiles,
+								       const unsigned long long *d_white_tiles,
+									     unsigned long long **sum_d,
+									     unsigned long long *bsum,
+									     unsigned long long *wsum)
+{
+	CHECK_CUDA(cudaMemset(sum_d[0], 0, 2*sizeof(**sum_d)));
+	getMagn_k<THREADS, BIT_X_SPIN><<<redBlocks, THREADS>>>(total_words, d_black_tiles, sum_d[0]);
+	CHECK_ERROR("getMagn_k");
+	CHECK_CUDA(cudaDeviceSynchronize());
+
+	bsum[0] = 0;
+	wsum[0] = 0;
+
+	unsigned long long sum_h[0][2];
+
+	CHECK_CUDA(cudaMemcpy(sum_h[0], sum_d[0], 2*sizeof(**sum_h), cudaMemcpyDeviceToHost));
+	bsum[0] += sum_h[0][0];
+	wsum[0] += sum_h[0][1];
+
+	return;
+}
+
 
 #endif

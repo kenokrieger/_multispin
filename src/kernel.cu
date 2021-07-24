@@ -24,9 +24,15 @@
  */
 
 #include <stdio.h>
+#include <iostream>
+#include <fstream>
+#include <iomanip>
+#include <map>
+
 #include "cudamacro.h"
 #include "traders.cuh"
 
+using namespace std;
 
 #define DIV_UP(a,b)  (((a) + ((b) - 1)) / (b))
 #define MIN(a,b)	(((a) < (b)) ? (a) : (b))
@@ -35,43 +41,44 @@
 #define THREADS 128
 #define BIT_X_SPIN (4)
 
-/*
- * 2048+: 16, 16, 2, 1
- *  1024: 16, 16, 1, 2
- *   512:  8,  8, 1, 1
- *   256:  4,  8, 1, 1
- *   128:  2,  8, 1, 1
-*/
 #define BLOCK_DIMENSION_X_DEFINE (16)
 #define BLOCK_DIMENSION_Y_DEFINE (16)
 
-#define TOTAL_UPDATES_DEFAULT (10000)
-#define SEED_DEFAULT  (463463564571ull)
 
-
-static void countSpins(const int redBlocks,
-								       const size_t total_words,
-								       const unsigned long long *d_black_tiles,
-								       const unsigned long long *d_white_tiles,
-									     unsigned long long **sum_d,
-									     unsigned long long *bsum,
-									     unsigned long long *wsum)
+map<string, string> read_config_file(string config_filename, string delimiter = "=")
 {
-	CHECK_CUDA(cudaMemset(sum_d[0], 0, 2*sizeof(**sum_d)));
-	getMagn_k<THREADS, BIT_X_SPIN><<<redBlocks, THREADS>>>(total_words, d_black_tiles, sum_d[0]);
-	CHECK_ERROR("getMagn_k");
-	CHECK_CUDA(cudaDeviceSynchronize());
+    std::ifstream config_file;
+    config_file.open(config_filename);
+    map<string, string> config;
 
-	bsum[0] = 0;
-	wsum[0] = 0;
+    if (!config_file.is_open()) {
+        std::cout << "Could not open file '" << config_filename << "'" << std::endl;
+        return config;
+    } else {
+        int row = 0;
+        std::string line = "";
+        std::string key = "";
 
-	unsigned long long sum_h[0][2];
+        std::cout << "Launch configuration:" << std::endl;
 
-	CHECK_CUDA(cudaMemcpy(sum_h[0], sum_d[0], 2*sizeof(**sum_h), cudaMemcpyDeviceToHost));
-	bsum[0] += sum_h[0][0];
-	wsum[0] += sum_h[0][1];
+        while (getline(config_file, line)) {
+            if (line[0] == '#' || line == "") continue;
+            int delimiter_position = line.find(delimiter);
 
-	return;
+            for (int idx = 0; idx < delimiter_position; idx++) {
+                if (line[idx] != ' ') key += line[idx];
+            }
+
+            std::string value = line.substr(delimiter_position + 1, line.length() - 1);
+            config[key] = value;
+            std::cout << '\t' << key << ": ";
+            std::cout << value << std::endl;
+            row++;
+            key = "";
+        }
+        config_file.close();
+        return config;
+    }
 }
 
 
@@ -81,18 +88,28 @@ int main(int argc, char **argv) {
 	unsigned long long *d_black_tiles = NULL;
 	unsigned long long *d_white_tiles = NULL;
 
+	const int SPIN_X_WORD = (8 * sizeof(*d_spins)) / BIT_X_SPIN;
+
 	cudaEvent_t start, stop;
   float elapsed_time;
 
-	const int SPIN_X_WORD = (8 * sizeof(*d_spins)) / BIT_X_SPIN;
-	int grid_width = 2048;
-	int grid_height = 2048;
-
-	int total_updates = TOTAL_UPDATES_DEFAULT;
-
-	unsigned long long seed = SEED_DEFAULT;
-
 	float temp  = 0.666f;
+
+	string config_filename = (argc == 1) ? "multising.conf" : argv[1];
+  map<string, string> config = read_config_file(config_filename);
+
+  const long long grid_height = std::stoll(config["grid_height"]);
+  const long long grid_width = std::stoll(config["grid_width"]);
+  const long long grid_depth = std::stoll(config["grid_depth"]);
+  unsigned int total_updates = std::stoul(config["total_updates"]);
+  unsigned long long seed = std::stoull(config["seed"]);
+  float alpha = std::stof(config["alpha"]);
+  float j = std::stof(config["j"]);
+  float beta = std::stof(config["beta"]);
+
+  float reduced_alpha = -2.0f * beta * alpha;
+  float reduced_j = -2.0f * beta * j;
+
 
 	if (!grid_width || (grid_width % 2) || ((grid_width / 2) % (2 * SPIN_X_WORD * BLOCK_DIMENSION_X_DEFINE))) {
 		fprintf(stderr, "\nPlease specify an grid_width dim multiple of %d\n\n", 2 * SPIN_X_WORD * 2 * BLOCK_DIMENSION_X_DEFINE);
@@ -104,17 +121,12 @@ int main(int argc, char **argv) {
 	}
 
 	cudaDeviceProp props;
-
-	printf("\nUsing GPU:\n");
-
 	CHECK_CUDA(cudaGetDeviceProperties(&props, 0));
-	printf("\t%2d (%s, %d SMs, %d th/SM max, CC %d.%d, ECC %s)\n",
-		0, props.name, props.multiProcessorCount,
+	printf("\nUsing GPU: %s, %d SMs, %d th/SM max, CC %d.%d, ECC %s\n",
+		props.name, props.multiProcessorCount,
 		props.maxThreadsPerMultiProcessor,
 		props.major, props.minor,
 		props.ECCEnabled ? "on" : "off");
-
-	printf("\n");
 
 	size_t words_per_row = (grid_width / 2) / SPIN_X_WORD;
 	// total lattice length
@@ -123,23 +135,6 @@ int main(int argc, char **argv) {
 	// words_per_row / 2 because each entry in the array has two components
 	dim3 blocks(DIV_UP(words_per_row / 2, BLOCK_DIMENSION_X_DEFINE), DIV_UP(grid_height, BLOCK_DIMENSION_Y_DEFINE));
 	dim3 threads_per_block(BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE);
-
-	printf("Run configuration:\n");
-	printf("\tspin/word: %d\n", SPIN_X_WORD);
-	printf("\tspins: %zu\n", total_words * SPIN_X_WORD);
-	printf("\tseed: %llu\n", seed);
-	printf("\titerations: %d\n", total_updates);
-	printf("\tblock (x, y): %d, %d\n", threads_per_block.x, threads_per_block.y);
-	printf("\ttile  (x, y): %d, %d\n", BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE);
-	printf("\tgrid  (x, y): %d, %d\n", blocks.x, blocks.y);
-
-	printf("\ttemp: %f \n", temp);
-
-	printf("\n");
-
-	printf("\tlattice size:      %8d x %8d\n", grid_height, grid_width);
-	printf("\tlattice shape: 2 x %8d x %8zu (%12zu %s)\n", grid_height, words_per_row, total_words, sizeof(*d_spins) == 4 ? "uints" : "ulls");
-	printf("\tmemory: %.2lf MB \n", (total_words * sizeof(*d_spins)) / (1024.0 * 1024.0));
 
 	const int redBlocks = MIN(DIV_UP(total_words, THREADS), (props.maxThreadsPerMultiProcessor / THREADS) * props.multiProcessorCount);
 
@@ -151,7 +146,6 @@ int main(int argc, char **argv) {
 	CHECK_CUDA(cudaMemset(d_spins, 0, total_words * sizeof(*d_spins)));
 
 	CHECK_CUDA(cudaMalloc(&sum_d[0], 2 * sizeof(**sum_d)));
-
 
 	d_black_tiles = d_spins;
 	d_white_tiles = d_spins + total_words / 2;
@@ -227,17 +221,14 @@ int main(int argc, char **argv) {
 
 	// compute total sum
 	countSpins(redBlocks, total_words, d_black_tiles, d_white_tiles, sum_d, &cntPos, &cntNeg);
-	printf("Final   magnetization: %9.6lf, up_s: %12llu, dw_s: %12llu (iter: %8d)\n\n",
+	printf("Final   magnetization: %9.6lf, up_s: %12llu, dw_s: %12llu \n\n",
 	       abs(static_cast<double>(cntPos)-static_cast<double>(cntNeg)) / (total_words*SPIN_X_WORD),
-	       cntPos, cntNeg, iteration);
+	       cntPos, cntNeg);
 
 	CHECK_CUDA(cudaEventElapsedTime(&elapsed_time, start, stop));
 
-	printf("Kernel execution time for %d update steps: %E ms, %.2lf flips/ns (BW: %.2lf GB/s)\n",
-		iteration, elapsed_time, static_cast<double>(total_words * SPIN_X_WORD) * iteration / (elapsed_time * 1.0E+6),
-		(2ull * iteration * (
-			  sizeof(*d_spins)*((total_words / 2) + (total_words / 2) + (total_words / 2))  // src color read, dst color read, dst color write
-			+ sizeof(*exp_d) * 5 * blocks.x * blocks.y ) * 1.0E-9) / (elapsed_time / 1.0E+3));
+	printf("Kernel execution time: %E ms, %.2lf flips/ns \n",
+		elapsed_time, static_cast<double>(total_words * SPIN_X_WORD) * iteration / (elapsed_time * 1.0E+6));
 
 	CHECK_CUDA(cudaFree(d_spins));
 	CHECK_CUDA(cudaFree(exp_d[0]));
