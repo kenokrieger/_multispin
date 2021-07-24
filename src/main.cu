@@ -61,7 +61,8 @@ __device__ __forceinline__ ulonglong2 __custom_make_int2(const unsigned long lon
 
 
 template<int BLOCK_DIMENSION_X, int BLOCK_DIMENSION_Y, int BITXSPIN, int COLOR, typename INT_T, typename INT2_T>
-__global__  void initialise_traders(const long long seed, const long long number_of_columns, INT2_T *__restrict__ traders)
+__global__  void initialise_traders(const long long seed, const long long number_of_columns, INT2_T *__restrict__ traders,
+																		float percentage = 0.5f)
 {
 	const int row = blockIdx.y * BLOCK_DIMENSION_Y + threadIdx.y;
 	const int col = blockIdx.x * BLOCK_DIMENSION_X + threadIdx.x;
@@ -88,10 +89,10 @@ __global__  void initialise_traders(const long long seed, const long long number
      * INT_T(1) << spin_position = 0000000000010000000
      * =>  traders =              0000000000010001000
      */
-		if (curand_uniform(&rng) < 0.5f) {
+		if (curand_uniform(&rng) < percentage) {
 			traders[index].x |= INT_T(1) << spin_position;
 		}
-		if (curand_uniform(&rng) < 0.5f) {
+		if (curand_uniform(&rng) < percentage) {
 			traders[index].y |= INT_T(1) << spin_position;
 		}
 	}
@@ -214,8 +215,6 @@ __global__ void update_strategies(const long long seed, const int number_of_prev
 
 	for(int spin_position = 0; spin_position < 8 * sizeof(INT_T); spin_position += BITXSPIN) {
 
-		// convert binary values to hexadecimal values, basically mapping 0, 2, 4, 6, 8
-		// onto 0, 1, 2, 3, 4 for easier array access
 		const int2 source = make_int2((target.x >> spin_position) & 0xF, (target.y >> spin_position) & 0xF);
 		const int2 sum = make_int2((center_neighbor.x >> spin_position) & 0xF, (center_neighbor.y >> spin_position) & 0xF);
 
