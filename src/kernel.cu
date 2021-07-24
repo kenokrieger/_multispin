@@ -82,6 +82,19 @@ map<string, string> read_config_file(string config_filename, string delimiter = 
 }
 
 
+void validate_grid(const long long grid_width, const long long grid_height, const int spin_x_word)
+{
+	if (!grid_width || (grid_width % 2) || ((grid_width / 2) % (2 * spin_x_word * BLOCK_DIMENSION_X_DEFINE))) {
+		fprintf(stderr, "\nPlease specify an grid_width dim multiple of %d\n\n", 2 * spin_x_word * 2 * BLOCK_DIMENSION_X_DEFINE);
+		exit(EXIT_FAILURE);
+	}
+	if (!grid_height || (grid_height % (BLOCK_DIMENSION_Y_DEFINE))) {
+		fprintf(stderr, "\nPlease specify a grid_height dim multiple of %d\n\n", BLOCK_DIMENSION_Y_DEFINE);
+		exit(EXIT_FAILURE);
+	}
+}
+
+
 int main(int argc, char **argv) {
 
 	unsigned long long *d_spins = NULL;
@@ -92,8 +105,6 @@ int main(int argc, char **argv) {
 
 	cudaEvent_t start, stop;
   float elapsed_time;
-
-	float temp  = 0.666f;
 
 	string config_filename = (argc == 1) ? "multising.conf" : argv[1];
   map<string, string> config = read_config_file(config_filename);
@@ -110,15 +121,7 @@ int main(int argc, char **argv) {
   float reduced_alpha = -2.0f * beta * alpha;
   float reduced_j = -2.0f * beta * j;
 
-
-	if (!grid_width || (grid_width % 2) || ((grid_width / 2) % (2 * SPIN_X_WORD * BLOCK_DIMENSION_X_DEFINE))) {
-		fprintf(stderr, "\nPlease specify an grid_width dim multiple of %d\n\n", 2 * SPIN_X_WORD * 2 * BLOCK_DIMENSION_X_DEFINE);
-		exit(EXIT_FAILURE);
-	}
-	if (!grid_height || (grid_height % (BLOCK_DIMENSION_Y_DEFINE))) {
-		fprintf(stderr, "\nPlease specify a grid_height dim multiple of %d\n\n", BLOCK_DIMENSION_Y_DEFINE);
-		exit(EXIT_FAILURE);
-	}
+	validate_grid(grid_width, grid_height, SPIN_X_WORD);
 
 	cudaDeviceProp props;
 	CHECK_CUDA(cudaGetDeviceProperties(&props, 0));
@@ -129,17 +132,15 @@ int main(int argc, char **argv) {
 		props.ECCEnabled ? "on" : "off");
 
 	size_t words_per_row = (grid_width / 2) / SPIN_X_WORD;
-	// total lattice length
 	size_t total_words = 2ull * static_cast<size_t>(grid_height) * words_per_row;
 
 	// words_per_row / 2 because each entry in the array has two components
 	dim3 blocks(DIV_UP(words_per_row / 2, BLOCK_DIMENSION_X_DEFINE), DIV_UP(grid_height, BLOCK_DIMENSION_Y_DEFINE));
 	dim3 threads_per_block(BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE);
-
 	const int redBlocks = MIN(DIV_UP(total_words, THREADS), (props.maxThreadsPerMultiProcessor / THREADS) * props.multiProcessorCount);
 
-	unsigned long long cntPos;
-	unsigned long long cntNeg;
+	unsigned long long spins_up;
+	unsigned long long spins_down;
 	unsigned long long *sum_d[0];
 
 	CHECK_CUDA(cudaMalloc(&d_spins, total_words * sizeof(*d_spins)));
@@ -150,47 +151,16 @@ int main(int argc, char **argv) {
 	d_black_tiles = d_spins;
 	d_white_tiles = d_spins + total_words / 2;
 
-	float *exp_d[0];
-	float  exp_h[2][5];
+	float *d_probabilities[0];
+	CHECK_CUDA(cudaMalloc(d_probabilities, 2 * 7 * sizeof(**d_probabilities)));
 
-	// precompute possible exponentials
-	for(int i = 0; i < 2; i++) {
-		for(int j = 0; j < 5; j++) {
-			if(temp > 0) {
-				exp_h[i][j] = expf((i ? -2.0f : 2.0f) * static_cast<float>(j * 2 - 4) * (1.0f / temp));
-			} else {
-				if(j == 2) {
-					exp_h[i][j] = 0.5f;
-				} else {
-					exp_h[i][j] = (i ? -2.0f : 2.0f) * static_cast<float>(j * 2 - 4);
-				}
-			}
-		}
-	}
-
-	CHECK_CUDA(cudaSetDevice(0));
-	CHECK_CUDA(cudaMalloc(exp_d, 2 * 5 * sizeof(**exp_d)));
-	CHECK_CUDA(cudaMemcpy(exp_d[0], exp_h, 2 * 5 * sizeof(**exp_d), cudaMemcpyHostToDevice));
+	const float market_coupling = 0.5f;
+	precompute_probabilities(d_probabilities[0], market_coupling, reduced_j);
 
 	CHECK_CUDA(cudaEventCreate(&start));
 	CHECK_CUDA(cudaEventCreate(&stop));
 
-	CHECK_CUDA(cudaSetDevice(0));
-	initialise_traders<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_BLACK, unsigned long long>
-	<<<blocks, threads_per_block>>>
-	(seed, words_per_row / 2, reinterpret_cast<ulonglong2 *>(d_black_tiles));
-	CHECK_ERROR("initialise_traders");
-
-	initialise_traders<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_WHITE, unsigned long long>
-	<<<blocks, threads_per_block>>>
-	(seed, words_per_row / 2, reinterpret_cast<ulonglong2 *>(d_white_tiles));
-	CHECK_ERROR("initialise_traders");
-
-	// compute sum over array
-	countSpins(redBlocks, total_words, d_black_tiles, d_white_tiles, sum_d, &cntPos, &cntNeg);
-	printf("\nInitial magnetization: %9.6lf, up_s: %12llu, dw_s: %12llu\n",
-	       abs(static_cast<double>(cntPos)-static_cast<double>(cntNeg)) / (total_words*SPIN_X_WORD),
-	       cntPos, cntNeg);
+	initialise_arrays<unsigned long long>(blocks, threads_per_block, seed, words_per_row / 2, d_black_tiles, d_white_tiles);
 
 	CHECK_CUDA(cudaSetDevice(0));
 	CHECK_CUDA(cudaDeviceSynchronize());
@@ -204,7 +174,7 @@ int main(int argc, char **argv) {
 		update_strategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_BLACK, unsigned long long>
 		<<<blocks, threads_per_block>>>
 		(seed, iteration + 1, (grid_width / 2) / SPIN_X_WORD / 2, grid_height, words_per_row / 2,
-		 reinterpret_cast<float (*)[5]>(exp_d[0]),
+		 reinterpret_cast<float (*)[5]>(d_probabilities[0]),
 		 reinterpret_cast<ulonglong2 *>(d_white_tiles),
 		 reinterpret_cast<ulonglong2 *>(d_black_tiles));
 
@@ -212,7 +182,7 @@ int main(int argc, char **argv) {
 		update_strategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_WHITE, unsigned long long>
 		<<<blocks, threads_per_block>>>
 		(seed, iteration + 1, (grid_width / 2) / SPIN_X_WORD / 2, grid_height, words_per_row / 2,
-		 reinterpret_cast<float (*)[5]>(exp_d[0]),
+		 reinterpret_cast<float (*)[5]>(d_probabilities[0]),
 		 reinterpret_cast<ulonglong2 *>(d_black_tiles),
 		 reinterpret_cast<ulonglong2 *>(d_white_tiles));
 	}
@@ -220,10 +190,10 @@ int main(int argc, char **argv) {
 	CHECK_CUDA(cudaEventSynchronize(stop));
 
 	// compute total sum
-	countSpins(redBlocks, total_words, d_black_tiles, d_white_tiles, sum_d, &cntPos, &cntNeg);
+	countSpins(redBlocks, total_words, d_black_tiles, d_white_tiles, sum_d, &spins_up, &spins_down);
 	printf("Final   magnetization: %9.6lf, up_s: %12llu, dw_s: %12llu \n\n",
-	       abs(static_cast<double>(cntPos)-static_cast<double>(cntNeg)) / (total_words*SPIN_X_WORD),
-	       cntPos, cntNeg);
+	       abs(static_cast<double>(spins_up)-static_cast<double>(spins_down)) / (total_words*SPIN_X_WORD),
+	       spins_up, spins_down);
 
 	CHECK_CUDA(cudaEventElapsedTime(&elapsed_time, start, stop));
 
@@ -231,7 +201,7 @@ int main(int argc, char **argv) {
 		elapsed_time, static_cast<double>(total_words * SPIN_X_WORD) * iteration / (elapsed_time * 1.0E+6));
 
 	CHECK_CUDA(cudaFree(d_spins));
-	CHECK_CUDA(cudaFree(exp_d[0]));
+	CHECK_CUDA(cudaFree(d_probabilities[0]));
 	CHECK_CUDA(cudaFree(sum_d[0]));
 
   CHECK_CUDA(cudaSetDevice(0));
