@@ -106,7 +106,7 @@ __device__ void load_tiles(const int grid_width, const int grid_height, const lo
 }
 
 
-__device__ void load_probabilities(const float precomputed_probabilities[][5], float shared_probabilities[2][5],
+__device__ void load_probabilities(const float precomputed_probabilities[][7], float shared_probabilities[2][7],
                                    const int block_dimension_x, const int block_dimension_y,
                                    const int tidx, const int tidy)
 {
@@ -128,11 +128,11 @@ __device__ void load_probabilities(const float precomputed_probabilities[][5], f
 
 
 template<int BLOCK_DIMENSION_X, int BLOCK_DIMENSION_Y, int BITXSPIN, int COLOR, typename INT_T, typename INT2_T>
-__global__ void update_strategies(const long long seed, const int number_of_previous_iterations,
+__global__ void update_strategies(const unsigned long long seed, const int number_of_previous_iterations,
 		       const int grid_width, // lattice width of one color in words
 		       const int grid_height, // lattice height (not in words)
 		       const long long number_of_columns,
-		       const float precomputed_probabilities[][5],
+		       const float precomputed_probabilities[][7],
 		       const INT2_T *__restrict__ checkerboard_agents,
 		             INT2_T *__restrict__ traders)
 {
@@ -145,7 +145,7 @@ __global__ void update_strategies(const long long seed, const int number_of_prev
 	load_tiles<BLOCK_DIMENSION_X, BLOCK_DIMENSION_Y, INT2_T>
   (grid_width, grid_height, number_of_columns, checkerboard_agents, shared_tiles);
 
-	__shared__ float shared_probabilities[2][5];
+	__shared__ float shared_probabilities[2][7];
   load_probabilities(precomputed_probabilities, shared_probabilities, BLOCK_DIMENSION_X, BLOCK_DIMENSION_Y, tidx, tidy);
 
 	__syncthreads();
@@ -215,47 +215,6 @@ void precompute_probabilities(float* probabilities, const float market_coupling,
 		return;
 }
 
-/*
-<dim3 BLOCKS, dim3 THREADS_PER_BLOCK, int SPIN_X_WORD>
-int update(int iteration,
-					 unsigned long long *d_black_tiles,
-           unsigned long long *d_white_tiles,
-           float* d_probabilities,
-					 const unsigned long long seed;
-           const float reduced_alpha,
-           const float reduced_j,
-           const long long grid_height, const long long grid_width, const long long grid_depth,
-				 	 const size_t words_per_row,
-				   const int reduce_blocks)
-{
-		countSpins(reduce_blocks, total_words, d_black_tiles, d_white_tiles, sum_d, &spins_up, &spins_down);
-		int magnetisation = cntPos - cntNeg;
-		float reduced_magnetisation = abs(magnetisation / (grid_width * grid_height * grid_depth));
-		float market_coupling = -reduced_alpha * reduced_magnetisation;
-		precompute_probabilities(probabilities, market_coupling, reduced_j);
-
-		CHECK_CUDA(cudaSetDevice(0));
-		update_strategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_BLACK, unsigned long long>
-		<<<BLOCKS, THREADS_PER_BLOCK>>>
-		(seed, iteration + 1, (grid_width / 2) / SPIN_X_WORD / 2, grid_height, words_per_row / 2,
-		 reinterpret_cast<float (*)[7]>(d_probabilities),
-		 reinterpret_cast<ulonglong2 *>(d_white_tiles),
-		 reinterpret_cast<ulonglong2 *>(d_black_tiles));
-
-		CHECK_CUDA(cudaSetDevice(0));
-		update_strategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_WHITE, unsigned long long>
-		<<<BLOCKS, THREADS_PER_BLOCK>>>
-		(seed, iteration + 1, (grid_width / 2) / SPIN_X_WORD / 2, grid_height, words_per_row / 2,
-		 reinterpret_cast<float (*)[7]>(d_probabilities),
-		 reinterpret_cast<ulonglong2 *>(d_black_tiles),
-		 reinterpret_cast<ulonglong2 *>(d_white_tiles));
-
-
-
-     return magnetisation;
-}
-*/
-
 
 template<int BLOCK_DIMENSION_X, int WSIZE, typename T>
 __device__ __forceinline__ T __block_sum(T traders)
@@ -293,15 +252,15 @@ __global__ void getMagn_k(const long long n,
 
 	const int SPIN_X_WORD = 8*sizeof(INT_T)/BITXSPIN;
 
-	const long long nth = static_cast<long long>(blockDim.x)*gridDim.x;
-	const long long thread_id = static_cast<long long>(blockDim.x)*blockIdx.x + threadIdx.x;
+	const long long nth = static_cast<long long>(blockDim.x) * gridDim.x;
+	const long long thread_id = static_cast<long long>(blockDim.x) * blockIdx.x + threadIdx.x;
 
 	SUM_T __cntP = 0;
 	SUM_T __cntN = 0;
 
 	for(long long i = 0; i < n; i += nth) {
 		if (i+thread_id < n) {
-			const int __c = __custom_popc(traders[i+thread_id]);
+			const int __c = __custom_popc(traders[i + thread_id]);
 			__cntP += __c;
 			__cntN += SPIN_X_WORD - __c;
 		}
@@ -340,6 +299,48 @@ static void countSpins(const int redBlocks,
 	wsum[0] += sum_h[0][1];
 
 	return;
+}
+
+
+template<int SPIN_X_WORD>
+int update(int iteration,
+				   dim3 blocks, dim3 threads_per_block, const int reduce_blocks,
+					 unsigned long long *d_black_tiles,
+           unsigned long long *d_white_tiles,
+					 unsigned long long **sum_d,
+           float* d_probabilities,
+					 unsigned long long spins_up,
+					 unsigned long long spins_down,
+					 const unsigned long long seed,
+           const float reduced_alpha,
+           const float reduced_j,
+           const long long grid_height, const long long grid_width, const long long grid_depth,
+				 	 const size_t words_per_row,
+				 	 const size_t total_words)
+{
+		countSpins(reduce_blocks, total_words, d_black_tiles, d_white_tiles, sum_d, &spins_up, &spins_down);
+		int magnetisation = spins_up - spins_down;
+		float reduced_magnetisation = abs(magnetisation / (grid_width * grid_height * grid_depth));
+		float market_coupling = -reduced_alpha * reduced_magnetisation;
+		precompute_probabilities(d_probabilities, market_coupling, reduced_j);
+
+		CHECK_CUDA(cudaSetDevice(0));
+		update_strategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_BLACK, unsigned long long>
+		<<<blocks, threads_per_block>>>
+		(seed, iteration + 1, (grid_width / 2) / SPIN_X_WORD / 2, grid_height, words_per_row / 2,
+		 reinterpret_cast<float (*)[7]>(d_probabilities),
+		 reinterpret_cast<ulonglong2 *>(d_white_tiles),
+		 reinterpret_cast<ulonglong2 *>(d_black_tiles));
+
+		CHECK_CUDA(cudaSetDevice(0));
+		update_strategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_WHITE, unsigned long long>
+		<<<blocks, threads_per_block>>>
+		(seed, iteration + 1, (grid_width / 2) / SPIN_X_WORD / 2, grid_height, words_per_row / 2,
+		 reinterpret_cast<float (*)[7]>(d_probabilities),
+		 reinterpret_cast<ulonglong2 *>(d_black_tiles),
+		 reinterpret_cast<ulonglong2 *>(d_white_tiles));
+
+     return magnetisation;
 }
 
 

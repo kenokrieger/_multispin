@@ -112,14 +112,14 @@ int main(int argc, char **argv) {
   const long long grid_height = std::stoll(config["grid_height"]);
   const long long grid_width = std::stoll(config["grid_width"]);
   const long long grid_depth = std::stoll(config["grid_depth"]);
-  unsigned int total_updates = std::stoul(config["total_updates"]);
-  unsigned long long seed = std::stoull(config["seed"]);
+  const unsigned int total_updates = std::stoul(config["total_updates"]);
+  const unsigned long long seed = std::stoull(config["seed"]);
   float alpha = std::stof(config["alpha"]);
   float j = std::stof(config["j"]);
   float beta = std::stof(config["beta"]);
 
-  float reduced_alpha = -2.0f * beta * alpha;
-  float reduced_j = -2.0f * beta * j;
+  const float reduced_alpha = -2.0f * beta * alpha;
+  const float reduced_j = -2.0f * beta * j;
 
 	validate_grid(grid_width, grid_height, SPIN_X_WORD);
 
@@ -131,13 +131,13 @@ int main(int argc, char **argv) {
 		props.major, props.minor,
 		props.ECCEnabled ? "on" : "off");
 
-	size_t words_per_row = (grid_width / 2) / SPIN_X_WORD;
-	size_t total_words = 2ull * static_cast<size_t>(grid_height) * words_per_row;
+	const size_t words_per_row = (grid_width / 2) / SPIN_X_WORD;
+	const size_t total_words = 2ull * static_cast<size_t>(grid_height) * words_per_row;
 
 	// words_per_row / 2 because each entry in the array has two components
 	dim3 blocks(DIV_UP(words_per_row / 2, BLOCK_DIMENSION_X_DEFINE), DIV_UP(grid_height, BLOCK_DIMENSION_Y_DEFINE));
 	dim3 threads_per_block(BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE);
-	const int redBlocks = MIN(DIV_UP(total_words, THREADS), (props.maxThreadsPerMultiProcessor / THREADS) * props.multiProcessorCount);
+	const int reduce_blocks = MIN(DIV_UP(total_words, THREADS), (props.maxThreadsPerMultiProcessor / THREADS) * props.multiProcessorCount);
 
 	unsigned long long spins_up;
 	unsigned long long spins_down;
@@ -154,9 +154,6 @@ int main(int argc, char **argv) {
 	float *d_probabilities[0];
 	CHECK_CUDA(cudaMalloc(d_probabilities, 2 * 7 * sizeof(**d_probabilities)));
 
-	const float market_coupling = 0.5f;
-	precompute_probabilities(d_probabilities[0], market_coupling, reduced_j);
-
 	CHECK_CUDA(cudaEventCreate(&start));
 	CHECK_CUDA(cudaEventCreate(&stop));
 
@@ -167,33 +164,24 @@ int main(int argc, char **argv) {
 
 	CHECK_CUDA(cudaEventRecord(start, 0));
   int iteration;
-	// main update loop
+	std::ofstream file;
+	file.open("magnetisation.dat");
 	for(iteration = 0; iteration < total_updates; iteration++) {
+		int global_market = update<SPIN_X_WORD>(iteration, blocks, threads_per_block, reduce_blocks,
+					 				      	d_black_tiles, d_white_tiles, sum_d, d_probabilities[0],
+					 								spins_up, spins_down,
+					 						  	seed, reduced_alpha, reduced_j,
+	         								grid_height, grid_width, grid_depth,
+					 						  	words_per_row, total_words);
 
-		CHECK_CUDA(cudaSetDevice(0));
-		update_strategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_BLACK, unsigned long long>
-		<<<blocks, threads_per_block>>>
-		(seed, iteration + 1, (grid_width / 2) / SPIN_X_WORD / 2, grid_height, words_per_row / 2,
-		 reinterpret_cast<float (*)[5]>(d_probabilities[0]),
-		 reinterpret_cast<ulonglong2 *>(d_white_tiles),
-		 reinterpret_cast<ulonglong2 *>(d_black_tiles));
+	  if (iteration % 10 == 0)
+		  file << global_market << ' ' << std::flush;
 
-		CHECK_CUDA(cudaSetDevice(0));
-		update_strategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_WHITE, unsigned long long>
-		<<<blocks, threads_per_block>>>
-		(seed, iteration + 1, (grid_width / 2) / SPIN_X_WORD / 2, grid_height, words_per_row / 2,
-		 reinterpret_cast<float (*)[5]>(d_probabilities[0]),
-		 reinterpret_cast<ulonglong2 *>(d_black_tiles),
-		 reinterpret_cast<ulonglong2 *>(d_white_tiles));
 	}
+	file.close();
+
 	CHECK_CUDA(cudaEventRecord(stop, 0));
 	CHECK_CUDA(cudaEventSynchronize(stop));
-
-	// compute total sum
-	countSpins(redBlocks, total_words, d_black_tiles, d_white_tiles, sum_d, &spins_up, &spins_down);
-	printf("Final   magnetization: %9.6lf, up_s: %12llu, dw_s: %12llu \n\n",
-	       abs(static_cast<double>(spins_up)-static_cast<double>(spins_down)) / (total_words*SPIN_X_WORD),
-	       spins_up, spins_down);
 
 	CHECK_CUDA(cudaEventElapsedTime(&elapsed_time, start, stop));
 
