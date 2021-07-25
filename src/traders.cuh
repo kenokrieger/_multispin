@@ -153,23 +153,23 @@ __device__ INT2_T compute_neighbor_sum(INT2_T front_neighbor, INT2_T back_neighb
 
 
 template<int BITXSPIN, typename INT_T, typename INT2_T>
-__device__ INT2_T flip_spins(curandStatePhilox4_32_10_t &rng, INT2_T target, INT2_T parallel_sum, const float shared_probabilities[][7])
+__device__ INT2_T flip_spins(curandStatePhilox4_32_10_t rng, INT2_T target, INT2_T parallel_sum, const float shared_probabilities[][7])
 {
 	const INT_T ONE = static_cast<INT_T>(1);
 	for(int spin_position = 0; spin_position < 8 * sizeof(INT_T); spin_position += BITXSPIN) {
 
-		const int2 source = make_int2((target.x >> spin_position) & 0xF, (target.y >> spin_position) & 0xF);
+		const int2 spin = make_int2((target.x >> spin_position) & 0xF, (target.y >> spin_position) & 0xF);
 		const int2 sum = make_int2((parallel_sum.x >> spin_position) & 0xF, (parallel_sum.y >> spin_position) & 0xF);
 
-		if (curand_uniform(&rng) <= shared_probabilities[source.x][sum.x]) {
+		if (curand_uniform(&rng) <= shared_probabilities[spin.x][sum.x]) {
 			target.x |= ONE << spin_position;
 		} else {
-			target.x &= ~(1ULL << spin_position);
+			target.x &= ~(ONE << spin_position);
 		}
-		if (curand_uniform(&rng) <= shared_probabilities[source.y][sum.y]) {
+		if (curand_uniform(&rng) <= shared_probabilities[spin.y][sum.y]) {
 			target.y |= ONE << spin_position;
 		} else {
-			target.y &= ~(1ULL << spin_position);
+			target.y &= ~(ONE << spin_position);
 		}
 	}
 	return target;
@@ -223,18 +223,20 @@ __global__ void update_strategies(const unsigned long long seed, const int numbe
 }
 
 
-void precompute_probabilities(float* probabilities, const float market_coupling, const float reduced_j) {
+void precompute_probabilities(float* probabilities, const float market_coupling, const float reduced_j)
+{
 		float h_probabilities[2][7];
 
 		for (int spin = 0; spin < 2; spin++) {
-			for (int neighbor_sum = 0; neighbor_sum < 7; neighbor_sum++) {
+			for (int idx = 0; idx < 7; idx++) {
+				int neighbor_sum = 2 * idx - 6;
 				double field = reduced_j * neighbor_sum + market_coupling * ((spin) ? 1 : -1);
-				h_probabilities[spin][neighbor_sum] = 1 / (1 + exp(field));
+				h_probabilities[spin][idx] = 1 / (1 + exp(field));
 				printf("%.3f ", 1 / (1 + exp(field)));
 			}
 		}
 		printf("\n");
-		CHECK_CUDA(cudaMemcpy(probabilities, h_probabilities, 2 * 7 * sizeof(**h_probabilities), cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(probabilities, &h_probabilities, 2 * 7 * sizeof(**h_probabilities), cudaMemcpyHostToDevice));
 		return;
 }
 
@@ -344,7 +346,6 @@ int update(int iteration,
 				 	 const size_t words_per_row,
 				 	 const size_t total_words)
 {
-		cudaDeviceSynchronize();
 		countSpins(reduce_blocks, total_words, d_black_tiles, d_white_tiles, sum_d, &spins_up, &spins_down);
 		long long magnetisation = static_cast<double>(spins_up) - static_cast<double>(spins_down);
 		float reduced_magnetisation = abs(magnetisation / static_cast<double>(grid_width * grid_height * grid_depth));

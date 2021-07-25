@@ -138,8 +138,8 @@ int main(int argc, char **argv) {
 	d_black_tiles = d_spins;
 	d_white_tiles = d_spins + total_words / 2;
 
-	float *d_probabilities[0];
-	CHECK_CUDA(cudaMalloc(d_probabilities, 2 * 7 * sizeof(**d_probabilities)));
+	float *d_probabilities;
+	CHECK_CUDA(cudaMalloc(&d_probabilities, 2 * 7 * sizeof(*d_probabilities)));
 
 	CHECK_CUDA(cudaEventCreate(&start));
 	CHECK_CUDA(cudaEventCreate(&stop));
@@ -157,7 +157,7 @@ int main(int argc, char **argv) {
 	file.open("data/magnetisation.dat");
 	for(iteration = 0; iteration < total_updates; iteration++) {
 		global_market = update<SPIN_X_WORD>(iteration, blocks, threads_per_block, reduce_blocks,
-					 				      	d_black_tiles, d_white_tiles, sum_d, d_probabilities[0],
+					 				      	d_black_tiles, d_white_tiles, sum_d, d_probabilities,
 					 								spins_up, spins_down,
 					 						  	seed, reduced_alpha, reduced_j,
 	         								grid_height, grid_width, grid_depth,
@@ -179,7 +179,7 @@ int main(int argc, char **argv) {
   printf("Final magnetisation: %d\n", global_market);
 
 	CHECK_CUDA(cudaFree(d_spins));
-	CHECK_CUDA(cudaFree(d_probabilities[0]));
+	CHECK_CUDA(cudaFree(d_probabilities));
 	CHECK_CUDA(cudaFree(sum_d[0]));
 
   CHECK_CUDA(cudaSetDevice(0));
