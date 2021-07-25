@@ -355,7 +355,7 @@ int update(int iteration,
 		 reinterpret_cast<ulonglong2 *>(d_black_tiles),
 		 reinterpret_cast<ulonglong2 *>(d_white_tiles));
 
-     return magnetisation;
+    return magnetisation;
 }
 
 

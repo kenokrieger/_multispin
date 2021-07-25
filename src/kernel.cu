@@ -70,6 +70,19 @@ void validate_grid(const long long grid_width, const long long grid_height, cons
 }
 
 
+cudaDeviceProp identify_gpu()
+{
+  cudaDeviceProp props;
+  CHECK_CUDA(cudaGetDeviceProperties(&props, 0));
+  printf("\nUsing GPU: %s, %d SMs, %d th/SM max, CC %d.%d, ECC %s\n",
+    props.name, props.multiProcessorCount,
+    props.maxThreadsPerMultiProcessor,
+    props.major, props.minor,
+    props.ECCEnabled ? "on" : "off");
+  return props;
+}
+
+
 int main(int argc, char **argv) {
 
 	unsigned long long *d_spins = NULL;
@@ -98,17 +111,10 @@ int main(int argc, char **argv) {
 
 	validate_grid(grid_width, grid_height, SPIN_X_WORD);
 
-	cudaDeviceProp props;
-	CHECK_CUDA(cudaGetDeviceProperties(&props, 0));
-	printf("\nUsing GPU: %s, %d SMs, %d th/SM max, CC %d.%d, ECC %s\n",
-		props.name, props.multiProcessorCount,
-		props.maxThreadsPerMultiProcessor,
-		props.major, props.minor,
-		props.ECCEnabled ? "on" : "off");
+  cudaDeviceProp props = identify_gpu();
 
 	const size_t words_per_row = (grid_width / 2) / SPIN_X_WORD;
 	const size_t total_words = 2ull * static_cast<size_t>(grid_height) * words_per_row;
-
 	// words_per_row / 2 because each entry in the array has two components
 	dim3 blocks(DIV_UP(words_per_row / 2, BLOCK_DIMENSION_X_DEFINE), DIV_UP(grid_height, BLOCK_DIMENSION_Y_DEFINE));
 	dim3 threads_per_block(BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE);
@@ -139,10 +145,11 @@ int main(int argc, char **argv) {
 
 	CHECK_CUDA(cudaEventRecord(start, 0));
   int iteration;
+  int global_market;
 	std::ofstream file;
-	file.open("magnetisation.dat");
+	file.open("data/magnetisation.dat");
 	for(iteration = 0; iteration < total_updates; iteration++) {
-		int global_market = update<SPIN_X_WORD>(iteration, blocks, threads_per_block, reduce_blocks,
+		global_market = update<SPIN_X_WORD>(iteration, blocks, threads_per_block, reduce_blocks,
 					 				      	d_black_tiles, d_white_tiles, sum_d, d_probabilities[0],
 					 								spins_up, spins_down,
 					 						  	seed, reduced_alpha, reduced_j,
@@ -162,6 +169,7 @@ int main(int argc, char **argv) {
 
 	printf("Kernel execution time: %E ms, %.2lf flips/ns \n",
 		elapsed_time, static_cast<double>(total_words * SPIN_X_WORD) * iteration / (elapsed_time * 1.0E+6));
+  printf("Final magnetisation: %d\n", global_market);
 
 	CHECK_CUDA(cudaFree(d_spins));
 	CHECK_CUDA(cudaFree(d_probabilities[0]));
