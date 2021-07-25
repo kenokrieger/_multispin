@@ -7,8 +7,9 @@
 #define BIT_X_SPIN (4)
 #define THREADS 128
 
-#define BLOCK_DIMENSION_X_DEFINE (16)
-#define BLOCK_DIMENSION_Y_DEFINE (16)
+#define BLOCK_DIMENSION_X_DEFINE (8)
+#define BLOCK_DIMENSION_Y_DEFINE (8)
+#define BLOCK_DIMENSION_Z_DEFINE (8)
 
 enum {C_BLACK, C_WHITE};
 
@@ -21,20 +22,19 @@ __device__ __forceinline__ uint2 __custom_make_int2(const unsigned int x, const 
 __device__ __forceinline__ ulonglong2 __custom_make_int2(const unsigned long long x, const unsigned long long y) {return make_ulonglong2(x, y);}
 
 
-template<int BLOCK_DIMENSION_X, int BLOCK_DIMENSION_Y, int BITXSPIN, int COLOR, typename INT_T, typename INT2_T>
-__global__  void initialise_traders(const unsigned long long seed, const long long number_of_columns, INT2_T *__restrict__ traders,
+template<int BITXSPIN, int COLOR, typename INT_T, typename INT2_T>
+__global__  void initialise_traders(const unsigned long long seed, const long long number_of_columns, const long long lattice_size,
+																	  INT2_T *__restrict__ traders,
 																		float percentage = 0.5f)
 {
-	const int row = blockIdx.y * BLOCK_DIMENSION_Y + threadIdx.y;
-	const int col = blockIdx.x * BLOCK_DIMENSION_X + threadIdx.x;
-  const int index = row * number_of_columns + col;
+	const int row = blockIdx.y * blockDim.y + threadIdx.y;
+	const int col = blockIdx.x * blockDim.x + threadIdx.x;
+	const int lid = blockIdx.z * blockDim.z + threadIdx.z;
+  const long long index = lid * lattice_size + row * number_of_columns + col;
 	const int SPIN_X_WORD = 8 * sizeof(INT_T) / BITXSPIN;
 
-	const long long thread_id = ((gridDim.y + blockIdx.y) * gridDim.x + blockIdx.x) * BLOCK_DIMENSION_X * BLOCK_DIMENSION_Y +
-	                              threadIdx.y * BLOCK_DIMENSION_X + threadIdx.x;
-
 	curandStatePhilox4_32_10_t rng;
-	curand_init(seed, thread_id, static_cast<long long>(2 * SPIN_X_WORD) * COLOR, &rng);
+	curand_init(seed, index, static_cast<long long>(2 * SPIN_X_WORD) * COLOR, &rng);
 
   traders[index] = __custom_make_int2(INT_T(0), INT_T(0));
 	for(int spin_position = 0; spin_position < 8 * sizeof(INT_T); spin_position += BITXSPIN) {
@@ -54,18 +54,19 @@ __global__  void initialise_traders(const unsigned long long seed, const long lo
 template<typename INT_T, typename INT2_T>
 void initialise_arrays(dim3 blocks, dim3 threads_per_block,
 								 			 const unsigned long long seed, const unsigned long long number_of_columns,
+											 const unsigned long long lattice_size,
 								 		 	 INT2_T *__restrict__ d_black_tiles, INT2_T *__restrict__ d_white_tiles,
 								 		 	 float percentage = 0.5f)
 {
 		CHECK_CUDA(cudaSetDevice(0));
-		initialise_traders<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_BLACK, INT_T>
+		initialise_traders<BIT_X_SPIN, C_BLACK, INT_T>
 		<<<blocks, threads_per_block>>>
-		(seed, number_of_columns, reinterpret_cast<ulonglong2 *>(d_black_tiles), percentage);
+		(seed, number_of_columns, lattice_size, reinterpret_cast<ulonglong2 *>(d_black_tiles), percentage);
 		CHECK_ERROR("initialise_traders");
 
-		initialise_traders<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_WHITE, INT_T>
+		initialise_traders<BIT_X_SPIN, C_WHITE, INT_T>
 		<<<blocks, threads_per_block>>>
-		(seed, number_of_columns, reinterpret_cast<ulonglong2 *>(d_white_tiles), percentage);
+		(seed, number_of_columns, lattice_size, reinterpret_cast<ulonglong2 *>(d_white_tiles), percentage);
 		CHECK_ERROR("initialise_traders");
 }
 
@@ -76,47 +77,46 @@ __device__ void load_tiles(const int grid_width, const int grid_height, const lo
 {
 	const int tidx = threadIdx.x;
 	const int tidy = threadIdx.y;
+	const int lattice_offset = (blockIdx.z * blockDim.z + threadIdx.z) * number_of_columns * grid_height;
 
 	const int tile_start_x = blockIdx.x * TILE_SIZE_X;
 	const int tile_start_y = blockIdx.y * TILE_SIZE_Y;
 
 	int row = tile_start_y + tidy;
 	int col = tile_start_x + tidx;
-	tile[1 + tidy][1 + tidx] = traders[row * number_of_columns + col];
+	tile[1 + tidy][1 + tidx] = traders[lattice_offset + row * number_of_columns + col];
 
 	if (tidy == 0) {
 		row = (tile_start_y % grid_height) == 0 ? tile_start_y + grid_height - 1 : tile_start_y - 1;
-		tile[0][1 + tidx] = traders[row * number_of_columns + col];
+		tile[0][1 + tidx] = traders[lattice_offset + row * number_of_columns + col];
 
 		row = ((tile_start_y + TILE_SIZE_Y) % grid_height) == 0 ? tile_start_y + TILE_SIZE_Y - grid_height : tile_start_y + TILE_SIZE_Y;
-		tile[1 + TILE_SIZE_Y][1 + tidx] = traders[row * number_of_columns + col];
+		tile[1 + TILE_SIZE_Y][1 + tidx] = traders[lattice_offset + row * number_of_columns + col];
 
 		row = tile_start_y + tidx;
 		col = (tile_start_x % grid_width) == 0 ? tile_start_x + grid_width - 1 : tile_start_x - 1;
-		tile[1 + tidx][0] = traders[row * number_of_columns + col];
+		tile[1 + tidx][0] = traders[lattice_offset + row * number_of_columns + col];
 
 		row = tile_start_y + tidx;
 		col = ((tile_start_x + TILE_SIZE_X) % grid_width) == 0 ? tile_start_x + TILE_SIZE_X - grid_width : tile_start_x + TILE_SIZE_X;
-		tile[1 + tidx][1 + TILE_SIZE_X] = traders[row * number_of_columns + col];
+		tile[1 + tidx][1 + TILE_SIZE_X] = traders[lattice_offset + row * number_of_columns + col];
 	}
 	return;
 }
 
 
-__device__ void load_probabilities(const float precomputed_probabilities[][7], float shared_probabilities[2][7],
-                                   const int block_dimension_x, const int block_dimension_y,
-                                   const int tidx, const int tidy)
+__device__ void load_probabilities(const float precomputed_probabilities[][7], float shared_probabilities[][7])
 {
   // load precomputed exponentials into shared memory.
-  // in case a threads_per_block consists of less than 2 * 5 threads
+  // in case a threads_per_block consists of less than 2 * 7 threads
   // multiple iterations in each thread are needed
   // otherwise loops will only trigger once
   #pragma unroll
-  for(int i = 0; i < 2; i += block_dimension_x) {
+  for(int i = 0; i < 2; i += blockDim.x) {
     #pragma unroll
-    for(int j = 0; j < 5; j += block_dimension_y) {
-      if (i + tidy < 2 && j + tidx < 5) {
-        shared_probabilities[i + tidy][j + tidx] = precomputed_probabilities[i + tidy][j + tidx];
+    for(int j = 0; j < 7; j += blockDim.y) {
+      if (i + threadIdx.y < 2 && j + threadIdx.x < 7) {
+        shared_probabilities[i + threadIdx.y][j + threadIdx.x] = precomputed_probabilities[i + threadIdx.y][j + threadIdx.x];
       }
     }
   }
@@ -125,7 +125,8 @@ __device__ void load_probabilities(const float precomputed_probabilities[][7], f
 
 
 template<int BLOCK_DIMENSION_X, int BITXSPIN, typename INT2_T>
-__device__ INT2_T compute_neighbor_sum(INT2_T shared_tiles[][BLOCK_DIMENSION_X + 2], const int tidx, const int tidy, const int shift_left)
+__device__ INT2_T compute_neighbor_sum(INT2_T front_neighbor, INT2_T back_neighbor, INT2_T shared_tiles[][BLOCK_DIMENSION_X + 2],
+	 																		 const int tidx, const int tidy, const int shift_left)
 {
 	// three nearest neighbors
 	INT2_T upper_neighbor  = shared_tiles[    tidy][1 + tidx];
@@ -144,8 +145,8 @@ __device__ INT2_T compute_neighbor_sum(INT2_T shared_tiles[][BLOCK_DIMENSION_X +
 	}
 
 	// this basically sums over all spins/word in parallel
-	center_neighbor.x += upper_neighbor.x + lower_neighbor.x + horizontal_neighbor.x;
-	center_neighbor.y += upper_neighbor.y + lower_neighbor.y + horizontal_neighbor.y;
+	center_neighbor.x += upper_neighbor.x + lower_neighbor.x + horizontal_neighbor.x + front_neighbor.x + back_neighbor.x;
+	center_neighbor.y += upper_neighbor.y + lower_neighbor.y + horizontal_neighbor.y + front_neighbor.y + back_neighbor.y;
 
 	return center_neighbor;
 }
@@ -162,19 +163,24 @@ __device__ INT2_T flip_spins(curandStatePhilox4_32_10_t &rng, INT2_T target, INT
 
 		if (curand_uniform(&rng) <= shared_probabilities[source.x][sum.x]) {
 			target.x |= ONE << spin_position;
+		} else {
+			target.x &= ~(1ULL << spin_position);
 		}
 		if (curand_uniform(&rng) <= shared_probabilities[source.y][sum.y]) {
 			target.y |= ONE << spin_position;
+		} else {
+			target.y &= ~(1ULL << spin_position);
 		}
 	}
 	return target;
 }
 
 
-template<int BLOCK_DIMENSION_X, int BLOCK_DIMENSION_Y, int BITXSPIN, int COLOR, typename INT_T, typename INT2_T>
+template<int BLOCK_DIMENSION_X, int BLOCK_DIMENSION_Y, int BLOCK_DIMENSION_Z, int BITXSPIN, int COLOR, typename INT_T, typename INT2_T>
 __global__ void update_strategies(const unsigned long long seed, const int number_of_previous_iterations,
 		       const int grid_width, // lattice width of one color in words
 		       const int grid_height, // lattice height (not in words)
+					 const int grid_depth,
 		       const long long number_of_columns,
 		       const float precomputed_probabilities[][7],
 		       const INT2_T *__restrict__ checkerboard_agents,
@@ -189,26 +195,29 @@ __global__ void update_strategies(const unsigned long long seed, const int numbe
   (grid_width, grid_height, number_of_columns, checkerboard_agents, shared_tiles);
 
 	__shared__ float shared_probabilities[2][7];
-  load_probabilities(precomputed_probabilities, shared_probabilities, BLOCK_DIMENSION_X, BLOCK_DIMENSION_Y, tidx, tidy);
+  load_probabilities(precomputed_probabilities, shared_probabilities);
 
 	__syncthreads();
 
-
 	const int row = blockIdx.y * BLOCK_DIMENSION_Y + tidy;
 	const int col = blockIdx.x * BLOCK_DIMENSION_X + tidx;
+	const int lid = blockIdx.z * BLOCK_DIMENSION_Z + threadIdx.z;
+	const long long index = lid * number_of_columns * grid_height + row * number_of_columns + col;
+	const long long back_index = ((lid - 1 < 0) ? grid_depth - 1 : lid - 1) * number_of_columns * grid_height + row * number_of_columns + col;
+	const long long front_index = ((lid + 1 > grid_depth - 1) ? 0 : lid + 1) * number_of_columns * grid_height + row * number_of_columns + col;
 
-	const long long thread_id = (blockIdx.y * gridDim.x + blockIdx.x) * BLOCK_DIMENSION_X * BLOCK_DIMENSION_Y
-                            +  threadIdx.y * BLOCK_DIMENSION_X + threadIdx.x;
-
-	INT2_T target = traders[row * number_of_columns + col];
-	const int shift_left = (COLOR == C_BLACK) ? !(row % 2) : (row % 2);
-	INT2_T parallel_sum = compute_neighbor_sum<BLOCK_DIMENSION_X, BITXSPIN, INT2_T>(shared_tiles, tidx, tidy, shift_left);
+	INT2_T target = traders[index];
+	INT2_T front_neighbor = checkerboard_agents[front_index];
+	INT2_T back_neighbor = checkerboard_agents[back_index];
+	const int first_tile_black = (lid % 2) ? (COLOR != C_BLACK) : (COLOR == C_BLACK);
+	const int shift_left = (first_tile_black) ? !(row % 2) : (row % 2);
+	INT2_T parallel_sum = compute_neighbor_sum<BLOCK_DIMENSION_X, BITXSPIN, INT2_T>(front_neighbor, back_neighbor, shared_tiles, tidx, tidy, shift_left);
 
 	curandStatePhilox4_32_10_t rng;
-	curand_init(seed, thread_id, static_cast<long long>(2 * SPIN_X_WORD) * (2 * number_of_previous_iterations + COLOR), &rng);
+	curand_init(seed, index, static_cast<long long>(2 * SPIN_X_WORD) * (2 * number_of_previous_iterations + COLOR), &rng);
 
 	target = flip_spins<BITXSPIN, INT_T, INT2_T>(rng, target, parallel_sum, shared_probabilities);
-	traders[row * number_of_columns + col] = target;
+	traders[index] = target;
 
 	return;
 }
@@ -221,8 +230,10 @@ void precompute_probabilities(float* probabilities, const float market_coupling,
 			for (int neighbor_sum = 0; neighbor_sum < 7; neighbor_sum++) {
 				double field = reduced_j * neighbor_sum + market_coupling * ((spin) ? 1 : -1);
 				h_probabilities[spin][neighbor_sum] = 1 / (1 + exp(field));
+				printf("%.3f ", 1 / (1 + exp(field)));
 			}
 		}
+		printf("\n");
 		CHECK_CUDA(cudaMemcpy(probabilities, h_probabilities, 2 * 7 * sizeof(**h_probabilities), cudaMemcpyHostToDevice));
 		return;
 }
@@ -323,7 +334,7 @@ int update(int iteration,
 					 unsigned long long *d_black_tiles,
            unsigned long long *d_white_tiles,
 					 unsigned long long **sum_d,
-           float* d_probabilities,
+           float *d_probabilities,
 					 unsigned long long spins_up,
 					 unsigned long long spins_down,
 					 const unsigned long long seed,
@@ -333,24 +344,26 @@ int update(int iteration,
 				 	 const size_t words_per_row,
 				 	 const size_t total_words)
 {
+		cudaDeviceSynchronize();
 		countSpins(reduce_blocks, total_words, d_black_tiles, d_white_tiles, sum_d, &spins_up, &spins_down);
-		int magnetisation = spins_up - spins_down;
-		float reduced_magnetisation = abs(magnetisation / (grid_width * grid_height * grid_depth));
+		long long magnetisation = static_cast<double>(spins_up) - static_cast<double>(spins_down);
+		float reduced_magnetisation = abs(magnetisation / static_cast<double>(grid_width * grid_height * grid_depth));
 		float market_coupling = -reduced_alpha * reduced_magnetisation;
+		printf("reduced market: %.4f\n", market_coupling);
 		precompute_probabilities(d_probabilities, market_coupling, reduced_j);
 
 		CHECK_CUDA(cudaSetDevice(0));
-		update_strategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_BLACK, unsigned long long>
+		update_strategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BLOCK_DIMENSION_Z_DEFINE, BIT_X_SPIN, C_BLACK, unsigned long long>
 		<<<blocks, threads_per_block>>>
-		(seed, iteration + 1, (grid_width / 2) / SPIN_X_WORD / 2, grid_height, words_per_row / 2,
+		(seed, iteration + 1, (grid_width / 2) / SPIN_X_WORD / 2, grid_height, grid_depth, words_per_row / 2,
 		 reinterpret_cast<float (*)[7]>(d_probabilities),
 		 reinterpret_cast<ulonglong2 *>(d_white_tiles),
 		 reinterpret_cast<ulonglong2 *>(d_black_tiles));
 
 		CHECK_CUDA(cudaSetDevice(0));
-		update_strategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_WHITE, unsigned long long>
+		update_strategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BLOCK_DIMENSION_Z_DEFINE, BIT_X_SPIN, C_WHITE, unsigned long long>
 		<<<blocks, threads_per_block>>>
-		(seed, iteration + 1, (grid_width / 2) / SPIN_X_WORD / 2, grid_height, words_per_row / 2,
+		(seed, iteration + 1, (grid_width / 2) / SPIN_X_WORD / 2, grid_height, grid_depth, words_per_row / 2,
 		 reinterpret_cast<float (*)[7]>(d_probabilities),
 		 reinterpret_cast<ulonglong2 *>(d_black_tiles),
 		 reinterpret_cast<ulonglong2 *>(d_white_tiles));

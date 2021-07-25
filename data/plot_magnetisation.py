@@ -6,7 +6,7 @@ from matplotlib.animation import FuncAnimation
 import time
 
 
-with open("multising.conf") as f:
+with open("../multising.conf") as f:
     for element in f.readlines():
         if "grid_height" in element:
             LATTICE_SIZE = int(element.replace("grid_height = ", "")) ** 3
