@@ -18,7 +18,7 @@ using namespace std;
 
 #define BLOCK_DIMENSION_X_DEFINE (8)
 #define BLOCK_DIMENSION_Y_DEFINE (8)
-#define BLOCK_DIMENSION_Z_DEFINE (8)
+#define BLOCK_DIMENSION_Z_DEFINE (4)
 
 map<string, string> read_config_file(string config_filename, string delimiter = "=")
 {
@@ -152,9 +152,12 @@ int main(int argc, char **argv) {
 
 	CHECK_CUDA(cudaEventRecord(start, 0));
   int iteration;
-  int global_market;
-	std::ofstream file;
-	file.open("data/magnetisation.dat");
+  int global_market = 0;
+  int global_market_before = 0;
+	std::ofstream magfile;
+  std::ofstream diff_file;
+	magfile.open("data/magnetisation.dat");
+  diff_file.open("data/magnetisation_difference.dat");
 	for(iteration = 0; iteration < total_updates; iteration++) {
 		global_market = update<SPIN_X_WORD>(iteration, blocks, threads_per_block, reduce_blocks,
 					 				      	d_black_tiles, d_white_tiles, sum_d, d_probabilities,
@@ -162,12 +165,15 @@ int main(int argc, char **argv) {
 					 						  	seed, reduced_alpha, reduced_j,
 	         								grid_height, grid_width, grid_depth,
 					 						  	words_per_row, total_words);
-
+    if (iteration % 10 == 0)
+      diff_file << global_market_before - global_market << ' ' << std::flush;
+    global_market_before = global_market;
 	  if (iteration % 10 == 0)
-		  file << global_market << ' ' << std::flush;
+		  magfile << global_market << ' ' << std::flush;
 
 	}
-	file.close();
+	magfile.close();
+  diff_file.close();
 
 	CHECK_CUDA(cudaEventRecord(stop, 0));
 	CHECK_CUDA(cudaEventSynchronize(stop));

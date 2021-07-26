@@ -2,7 +2,10 @@
 
 <img src="images/license.svg" alt="MIT License">
 
-## Outline
+Multising is an executable to simulate the ising market model with large three
+dimensional spin lattices on a GPU. For [usage](#usage) see below.
+
+## Theoretical Background
 
 This particular model attempts to predict the behavior of traders in a market
 governed by two simple guidelines:
@@ -30,6 +33,8 @@ The model is thus controlled by the three parameters
 
 - &beta;, which controls the randomness
 
+For &alpha; = 0 the model is equivalent to the ising model.
+
 (For more details see <a href="https://arxiv.org/pdf/cond-mat/0105224.pdf">
 S.Bornholdt, "Expectation bubbles in a spin model of markets: Intermittency from
 frustration across scales, 2001"</a>)
@@ -40,8 +45,10 @@ frustration across scales, 2001"</a>)
 
 The main idea behind the metropolis algorithm is to split the main lattice into
 two sub-lattices with half of the original grid width. You can think of these lattices
-as tiles on a chessboard (see figure below).</br>
-<img src="images/metropolis3d.png" alt="3d metropolis algorithm" height="350"> </br>
+as tiles on a chessboard (see figure below).
+
+<img src="images/metropolis3d.png" alt="3d metropolis algorithm" height="350">
+
 Each black or white tile at position p = (row, col, lattice_id) can be assigned
 an individual index in a 1 dimensional array.
 
@@ -49,58 +56,58 @@ an individual index in a 1 dimensional array.
 ### Precomputation
 
 Looking at the equation from the outline one can see, that for each iteration
-there exist 14 possible values for the probability *p*. These values can be
-precomputed and assigned an index ranging from 0 to 13.
+there exist 14 possible values for the probability *p* which do not change across
+loops.
 
 ```c++
-void compute_probabilities(float* probabilities, const float market_coupling, const float reduced_j)
+void precompute_probabilities(float* probabilities, const float market_coupling, const float reduced_j)
 {
-    for (int idx = 0; idx < 14; idx++) {
-        double field = reduced_j * (2 * idx - 6 - 14 * (idx / 7)) + market_coupling * ((idx < 7) ? -1 : 1);
-        probabilities[idx] = 1 / (1 + exp(field));
-    }
+		float h_probabilities[2][7];
+
+		for (int spin = 0; spin < 2; spin++) {
+			for (int idx = 0; idx < 7; idx++) {
+				int neighbor_sum = 2 * idx - 6;
+				double field = reduced_j * neighbor_sum + market_coupling * ((spin) ? 1 : -1);
+				h_probabilities[spin][idx] = 1 / (1 + exp(field));
+			}
+		}
+		CHECK_CUDA(cudaMemcpy(probabilities, &h_probabilities,
+                   2 * 7 * sizeof(**h_probabilities), cudaMemcpyHostToDevice));
+		return;
 }
 ```
 
-Instead of computing the probability for each spin, the kernel now only has to
-find the respective value for each individual spin in the array which only depends
-on the sum over the 6 neighbors and its own orientation.
-
-```c++
-float probability = probabilities[7 * ((traders[index] < 0) ? 0 : 1) + (neighbor_sum + 6) / 2];
-traders[index] = random_values[index] < probability ? 1 : -1;
-```
+Instead of computing the probability for each spin individually, the kernel now only
+has to find the respective value for each individual spin in the array which only
+depends on the sum over the 6 neighbors and its own orientation.
 
 ### Multispin Coding Approach
 
-Multispin coding stores spin values in individual bits rather than full bytes leading to more efficient memory usage and thus faster computation times.
+Multispin coding stores spin values in individual bits rather than full bytes
+leading to more efficient memory usage and thus faster computation times.
 The spin values are mapped from (-1, 1) to the binary tuple (0, 1). This
 allows for each spin to be resembled by an individual bit. An unsigned long
 long (with size of 64 bits), for example, can store 16 spins. The remaining
 bits are left untouched to enable a fast computation of the nearest neighbors
-sum. Lets look at a simplified example of storing two spins in a 8 bit
-variable:
+sum. Technically, only 3 bits are needed to store values up to 7, but that would
+lead to more complicated edge cases. In the figure below, an example is shown
+where four spins are stored in a variable indexed by x and y.
 
-The tuple of source spins is represented by 00010001 with nearest neighbors
-00000000, 00010000, 00000000, 00000001. In this example we are dealing with two spins in parallel. To compute the nearest neighbors sum it is sufficient
-to simply add all four values and look at the resulting bits.
+<img src="images/lattice_decomposition.png" alt="3d metropolis algorithm" height="350">
 
-- 00000000 =  0
-- 00010000 = 16
-- 00000000 = 0
-- 00000001 = 1
+To compute the sum of the four nearest neighbors in the plane, the neighbors of
+the new variable can be used. However one entry needs to be altered slightly
+depending on color and row parity. By summing over the neighbors, all four nearest
+neighbor sums are basically computed in parallel. The neighbors in the front and
+back lattices do not need to be altered and can simply be added to the sum.
 
-The sum over all neighbors thus equals 17.
+<img src="images/spin_flipping.png" alt="3d metropolis algorithm" height="350">
 
-- 17 = 00010001
+## Usage
 
-To find the number of neighbors with spin up for each individual spin, one
-only needs to look at the 4 bits allocated for the storage of the spin. In
-this example both spins have one neighbor with spin up.
+### Compiling
 
-## Compiling
-
-### On Ubuntu/Linux
+#### On Ubuntu/Linux
 
 To compile and run the executable you need to have a system with a CUDA-capable
 GPU. Additionaly you need to install the cuda-toolkit as well as suitable
@@ -109,3 +116,21 @@ produce the executable with the `make` command.
 
 **Note:** You may need to adjust the `-arch` option in the Makefile according
 to the compute capabilities of your GPU.
+
+#### On Windows/Mac
+
+Most (if not all) of the code should be cross-platform. However, it is not tested
+on those platforms and correct results cannot be guaranteed. You need to compile
+it manually, using the command from the Makefile.
+
+### Running
+
+The program expects a file "multising.conf" in the directory it is called from.
+This file contains all the values for the simulation like grid size and parameters.
+The path to the file can also be passed as the first argument in the terminal.
+
+Example configuration file:
+
+\```multising.conf
+
+\```
