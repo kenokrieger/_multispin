@@ -131,6 +131,14 @@ The path to the file can also be passed as the first argument in the terminal.
 
 Example configuration file:
 
-```multising.conf
-
+```
+grid_height = 512
+grid_width = 512
+grid_depth = 512
+total_updates = 100000
+seed = 2458242462
+alpha = 15.0
+j = 1.0
+beta = 0.6
+init_up = 0.5
 ```
