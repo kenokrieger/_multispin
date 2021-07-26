@@ -131,6 +131,6 @@ The path to the file can also be passed as the first argument in the terminal.
 
 Example configuration file:
 
-\```multising.conf
+```multising.conf
 
-\```
+```
