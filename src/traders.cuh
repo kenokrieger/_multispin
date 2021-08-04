@@ -237,7 +237,7 @@ __global__ void update_strategies(const unsigned long long seed, const int numbe
 
 	INT2_T target = traders[index];
 
-	if (grid_depth != 0) {
+	if (grid_depth != 1) {
 		const long long back_index = ((lid - 1 < 0) ? grid_depth - 1 : lid - 1) * number_of_columns * grid_height + row * number_of_columns + col;
 		const long long front_index = ((lid + 1 > grid_depth - 1) ? 0 : lid + 1) * number_of_columns * grid_height + row * number_of_columns + col;
 		INT2_T front_neighbor = checkerboard_agents[front_index];

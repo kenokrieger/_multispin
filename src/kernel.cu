@@ -68,9 +68,11 @@ void validate_grid(const long long grid_width, const long long grid_height, cons
 		fprintf(stderr, "\nPlease specify a grid_height multiple of %d\n\n", BLOCK_DIMENSION_Y_DEFINE);
 		exit(EXIT_FAILURE);
 	}
-  if (!grid_depth || (grid_depth % (BLOCK_DIMENSION_Z_DEFINE))) {
-    fprintf(stderr, "\nPlease specify a grid_depth multiple of %d\n\n", BLOCK_DIMENSION_Z_DEFINE);
-    exit(EXIT_FAILURE);
+  if (grid_depth % (BLOCK_DIMENSION_Z_DEFINE)) {
+    if (grid_depth != 1) {
+      fprintf(stderr, "\nPlease specify a grid_depth multiple of %d\n\n", BLOCK_DIMENSION_Z_DEFINE);
+      exit(EXIT_FAILURE);
+    }
   }
 }
 
@@ -123,7 +125,7 @@ int main(int argc, char **argv) {
 	const size_t total_words = 2ull * static_cast<size_t>(grid_height) * words_per_row * static_cast<size_t>(grid_depth);
 
   int zblocks, zthreads;
-  if (grid_depth != 0) {
+  if (grid_depth != 1) {
     zblocks = DIV_UP(grid_depth, BLOCK_DIMENSION_Z_DEFINE);
     zthreads = BLOCK_DIMENSION_Z_DEFINE;
   } else {
