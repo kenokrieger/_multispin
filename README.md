@@ -142,3 +142,7 @@ j = 1.0
 beta = 0.6
 init_up = 0.5
 ```
+
+For alpha = 0 this model resembles the standard Ising model. You may also
+specify grid_depth = 1 to run the simulation in two dimensions with four nearest
+neighbors.
