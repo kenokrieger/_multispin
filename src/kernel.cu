@@ -121,9 +121,21 @@ int main(int argc, char **argv) {
 
 	const size_t words_per_row = (grid_width / 2) / SPIN_X_WORD;
 	const size_t total_words = 2ull * static_cast<size_t>(grid_height) * words_per_row * static_cast<size_t>(grid_depth);
-	// words_per_row / 2 because each entry in the array has two components
-	dim3 blocks(DIV_UP(words_per_row / 2, BLOCK_DIMENSION_X_DEFINE), DIV_UP(grid_height, BLOCK_DIMENSION_Y_DEFINE), DIV_UP(grid_depth, BLOCK_DIMENSION_Z_DEFINE));
-	dim3 threads_per_block(BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BLOCK_DIMENSION_Z_DEFINE);
+
+  int zblocks, zthreads;
+  if (grid_depth != 0) {
+    zblocks = DIV_UP(grid_depth, BLOCK_DIMENSION_Z_DEFINE);
+    zthreads = BLOCK_DIMENSION_Z_DEFINE;
+  } else {
+    // even if z dimension is not needed, launch with one z-Block with one thread
+    // this allows blockIdx.z and the like to still be accessible in the kernel
+    // and thus does not require any changes in the existing algorithm
+    zblocks = 1;
+    zthreads = 1;
+  }
+  // words_per_row / 2 because each entry in the array has two components
+  dim3 blocks(DIV_UP(words_per_row / 2, BLOCK_DIMENSION_X_DEFINE), DIV_UP(grid_height, BLOCK_DIMENSION_Y_DEFINE), zblocks);
+  dim3 threads_per_block(BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, zthreads);
 	const int reduce_blocks = MIN(DIV_UP(total_words, THREADS), (props.maxThreadsPerMultiProcessor / THREADS) * props.multiProcessorCount);
 
 	unsigned long long spins_up;

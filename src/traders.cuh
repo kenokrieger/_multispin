@@ -151,6 +151,33 @@ __device__ INT2_T compute_neighbor_sum(INT2_T front_neighbor, INT2_T back_neighb
 	return center_neighbor;
 }
 
+template<int BLOCK_DIMENSION_X, int BITXSPIN, typename INT2_T>
+__device__ INT2_T compute_neighbor_sum(bool front_neighbor, bool back_neighbor, INT2_T shared_tiles[][BLOCK_DIMENSION_X + 2],
+	 																		 const int tidx, const int tidy, const int shift_left)
+{
+	// three nearest neighbors
+	INT2_T upper_neighbor  = shared_tiles[    tidy][1 + tidx];
+	INT2_T center_neighbor = shared_tiles[1 + tidy][1 + tidx];
+	INT2_T lower_neighbor  = shared_tiles[2 + tidy][1 + tidx];
+
+	// remaining neighbor, either left or right
+	INT2_T horizontal_neighbor = (shift_left) ? shared_tiles[1 + tidy][tidx] : shared_tiles[1 + tidy][2 + tidx];
+
+	if (shift_left) {
+		horizontal_neighbor.x = (center_neighbor.x << BITXSPIN) | (horizontal_neighbor.y >> (8 * sizeof(horizontal_neighbor.y) - BITXSPIN));
+		horizontal_neighbor.y = (center_neighbor.y << BITXSPIN) | (center_neighbor.x >> (8 * sizeof(center_neighbor.x) - BITXSPIN));
+	} else {
+		horizontal_neighbor.y = (center_neighbor.y >> BITXSPIN) | (horizontal_neighbor.x << (8 * sizeof(horizontal_neighbor.x) - BITXSPIN));
+		horizontal_neighbor.x = (center_neighbor.x >> BITXSPIN) | (center_neighbor.y << (8 * sizeof(center_neighbor.y) - BITXSPIN));
+	}
+
+	// this basically sums over all spins/word in parallel
+	center_neighbor.x += upper_neighbor.x + lower_neighbor.x + horizontal_neighbor.x;
+	center_neighbor.y += upper_neighbor.y + lower_neighbor.y + horizontal_neighbor.y;
+
+	return center_neighbor;
+}
+
 
 template<int BITXSPIN, typename INT_T, typename INT2_T>
 __device__ INT2_T flip_spins(curandStatePhilox4_32_10_t rng, INT2_T target, INT2_T parallel_sum, const float shared_probabilities[][7])
@@ -199,19 +226,28 @@ __global__ void update_strategies(const unsigned long long seed, const int numbe
 
 	__syncthreads();
 
+	INT2_T parallel_sum;
+
 	const int row = blockIdx.y * BLOCK_DIMENSION_Y + tidy;
 	const int col = blockIdx.x * BLOCK_DIMENSION_X + tidx;
 	const int lid = blockIdx.z * BLOCK_DIMENSION_Z + threadIdx.z;
-	const long long index = lid * number_of_columns * grid_height + row * number_of_columns + col;
-	const long long back_index = ((lid - 1 < 0) ? grid_depth - 1 : lid - 1) * number_of_columns * grid_height + row * number_of_columns + col;
-	const long long front_index = ((lid + 1 > grid_depth - 1) ? 0 : lid + 1) * number_of_columns * grid_height + row * number_of_columns + col;
-
-	INT2_T target = traders[index];
-	INT2_T front_neighbor = checkerboard_agents[front_index];
-	INT2_T back_neighbor = checkerboard_agents[back_index];
 	const int first_tile_black = (lid % 2) ? (COLOR != C_BLACK) : (COLOR == C_BLACK);
 	const int shift_left = (first_tile_black) ? !(row % 2) : (row % 2);
-	INT2_T parallel_sum = compute_neighbor_sum<BLOCK_DIMENSION_X, BITXSPIN, INT2_T>(front_neighbor, back_neighbor, shared_tiles, tidx, tidy, shift_left);
+	const long long index = lid * number_of_columns * grid_height + row * number_of_columns + col;
+
+	INT2_T target = traders[index];
+
+	if (grid_depth != 0) {
+		const long long back_index = ((lid - 1 < 0) ? grid_depth - 1 : lid - 1) * number_of_columns * grid_height + row * number_of_columns + col;
+		const long long front_index = ((lid + 1 > grid_depth - 1) ? 0 : lid + 1) * number_of_columns * grid_height + row * number_of_columns + col;
+		INT2_T front_neighbor = checkerboard_agents[front_index];
+		INT2_T back_neighbor = checkerboard_agents[back_index];
+		parallel_sum = compute_neighbor_sum<BLOCK_DIMENSION_X, BITXSPIN, INT2_T>(front_neighbor, back_neighbor, shared_tiles, tidx, tidy, shift_left);
+	} else {
+		bool front_neighbor = false;
+		bool back_neighbor = false;
+		parallel_sum = compute_neighbor_sum<BLOCK_DIMENSION_X, BITXSPIN, INT2_T>(front_neighbor, back_neighbor, shared_tiles, tidx, tidy, shift_left);
+	}
 
 	curandStatePhilox4_32_10_t rng;
 	curand_init(seed, index, static_cast<long long>(2 * SPIN_X_WORD) * (2 * number_of_previous_iterations + COLOR), &rng);
@@ -346,11 +382,16 @@ int update(int iteration,
 				 	 const size_t words_per_row,
 				 	 const size_t total_words)
 {
-		countSpins(reduce_blocks, total_words, d_black_tiles, d_white_tiles, sum_d, &spins_up, &spins_down);
-		long long magnetisation = static_cast<double>(spins_up) - static_cast<double>(spins_down);
-		float reduced_magnetisation = abs(magnetisation / static_cast<double>(grid_width * grid_height * grid_depth));
-		float market_coupling = -reduced_alpha * reduced_magnetisation;
-		printf("reduced market: %.4f\n", market_coupling);
+		float market_coupling;
+		long long magnetisation = -1;
+		if (abs(reduced_alpha) > 1.0e-5) {
+			countSpins(reduce_blocks, total_words, d_black_tiles, d_white_tiles, sum_d, &spins_up, &spins_down);
+			magnetisation = static_cast<double>(spins_up) - static_cast<double>(spins_down);
+			float reduced_magnetisation = abs(magnetisation / static_cast<double>(grid_width * grid_height * grid_depth));
+			market_coupling = -reduced_alpha * reduced_magnetisation;
+		} else {
+			market_coupling = 0.0;
+		}
 		precompute_probabilities(d_probabilities, market_coupling, reduced_j);
 
 		CHECK_CUDA(cudaSetDevice(0));
