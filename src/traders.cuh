@@ -24,29 +24,40 @@ __device__ __forceinline__ ulonglong2 __custom_make_int2(const unsigned long lon
 
 template<int BITXSPIN, int COLOR, typename INT_T, typename INT2_T>
 __global__  void initialise_traders(const unsigned long long seed, const long long number_of_columns, const long long lattice_size,
-																	  INT2_T *__restrict__ traders,
+																	  INT2_T *__restrict__ traders, curandStatePhilox4_32_10_t* rng,
 																		float percentage = 0.5f)
 {
-	const int row = blockIdx.y * blockDim.y + threadIdx.y;
-	const int col = blockIdx.x * blockDim.x + threadIdx.x;
-	const int lid = blockIdx.z * blockDim.z + threadIdx.z;
-  const long long index = lid * lattice_size + row * number_of_columns + col;
-	const int SPIN_X_WORD = 8 * sizeof(INT_T) / BITXSPIN;
+	const int stridex = grid_width / gridDim.x; // prob. not correct so far
+	const int stridey = grid_height / gridDim.y;
+	const int stridez = grid_depth / gridDim.z;
+	const int start_row = blockIdx.y * blockDim.y + threadIdx.y;
+	const int start_col = blockIdx.x * blockDim.x + threadIdx.x;
+	const int start_lid = blockIdx.z * blockDim.z + threadIdx.z;
+	const long long thread_id = start_lid * lattice_size + start_row * number_of_columns + start_col;
+	curand_init(seed, thread_id, 0, &rng[thread_id]);
+	for (int xloop = stridex * start_col; xloop < stridex * (start_col + 1); xloop++) {
+		for (int yloop = stridey * start_row; yloop < stridey * (start_row + 1); yloop++) {
+			for (int zloop = stridez * start_lid; zloop < stridez * (start_lid + 1); zloop++) {
+				// main thread function
+				const long long index = zloop * lattice_size + yloop * number_of_columns + xloop;
+				const int SPIN_X_WORD = 8 * sizeof(INT_T) / BITXSPIN;
 
-	curandStatePhilox4_32_10_t rng;
-	curand_init(seed, index, static_cast<long long>(2 * SPIN_X_WORD) * COLOR, &rng);
-
-  traders[index] = __custom_make_int2(INT_T(0), INT_T(0));
-	for(int spin_position = 0; spin_position < 8 * sizeof(INT_T); spin_position += BITXSPIN) {
-		// The two if clauses are not identical since curand_uniform()
-		// returns a different number on each invokation
-		if (curand_uniform(&rng) < percentage) {
-			traders[index].x |= INT_T(1) << spin_position;
-		}
-		if (curand_uniform(&rng) < percentage) {
-			traders[index].y |= INT_T(1) << spin_position;
+			  traders[index] = __custom_make_int2(INT_T(0), INT_T(0));
+				for(int spin_position = 0; spin_position < 8 * sizeof(INT_T); spin_position += BITXSPIN) {
+					// The two if clauses are not identical since curand_uniform()
+					// returns a different number on each invokation
+					if (curand_uniform(&rng[thread_id]) < percentage) {
+						traders[index].x |= INT_T(1) << spin_position;
+					}
+					if (curand_uniform(&rng[thread_id]) < percentage) {
+						traders[index].y |= INT_T(1) << spin_position;
+					}
+				}
+			}
 		}
 	}
+
+
 	return;
 }
 
@@ -268,10 +279,8 @@ void precompute_probabilities(float* probabilities, const float market_coupling,
 				int neighbor_sum = 2 * idx - 6;
 				double field = reduced_j * neighbor_sum + market_coupling * ((spin) ? 1 : -1);
 				h_probabilities[spin][idx] = 1 / (1 + exp(field));
-				printf("%.3f ", 1 / (1 + exp(field)));
 			}
 		}
-		printf("\n");
 		CHECK_CUDA(cudaMemcpy(probabilities, &h_probabilities, 2 * 7 * sizeof(**h_probabilities), cudaMemcpyHostToDevice));
 		return;
 }
@@ -313,7 +322,7 @@ __global__ void getMagn_k(const long long n,
 			                    SUM_T *__restrict__ sum)
 {
 	// to be optimized
-	const int SPIN_X_WORD = 8*sizeof(INT_T)/BITXSPIN;
+	const int SPIN_X_WORD = 8 * sizeof(INT_T) / BITXSPIN;
 
 	const long long nth = static_cast<long long>(blockDim.x) * gridDim.x;
 	const long long thread_id = static_cast<long long>(blockDim.x) * blockIdx.x + threadIdx.x;
@@ -322,7 +331,7 @@ __global__ void getMagn_k(const long long n,
 	SUM_T __cntN = 0;
 
 	for(long long i = 0; i < n; i += nth) {
-		if (i+thread_id < n) {
+		if (i + thread_id < n) {
 			const int __c = __custom_popc(traders[i + thread_id]);
 			__cntP += __c;
 			__cntN += SPIN_X_WORD - __c;
@@ -343,55 +352,54 @@ __global__ void getMagn_k(const long long n,
 static void countSpins(const int redBlocks,
 								       const size_t total_words,
 								       const unsigned long long *d_black_tiles,
-								       const unsigned long long *d_white_tiles,
-									     unsigned long long **sum_d,
+									     unsigned long long *sum_d,
 									     unsigned long long *bsum,
 									     unsigned long long *wsum)
 {
-	CHECK_CUDA(cudaMemset(sum_d[0], 0, 2*sizeof(**sum_d)));
-	getMagn_k<THREADS, BIT_X_SPIN><<<redBlocks, THREADS>>>(total_words, d_black_tiles, sum_d[0]);
+	CHECK_CUDA(cudaMemset(sum_d, 0, 2 * sizeof(*sum_d)));
+	// Only the pointer to the black tiles is needed, since it provides access
+	// to all spins (d_spins).
+	// see definition in kernel.cu:
+	// 		d_black_tiles = d_spins;
+	// 		d_white_tiles = d_spins + total_words / 2;
+	getMagn_k<THREADS, BIT_X_SPIN><<<redBlocks, THREADS>>>(total_words, d_black_tiles, sum_d);
 	CHECK_ERROR("getMagn_k");
 	CHECK_CUDA(cudaDeviceSynchronize());
 
 	bsum[0] = 0;
 	wsum[0] = 0;
 
-	unsigned long long sum_h[0][2];
+	unsigned long long sum_h[2];
 
-	CHECK_CUDA(cudaMemcpy(sum_h[0], sum_d[0], 2*sizeof(**sum_h), cudaMemcpyDeviceToHost));
-	bsum[0] += sum_h[0][0];
-	wsum[0] += sum_h[0][1];
+	CHECK_CUDA(cudaMemcpy(sum_h, sum_d, 2 * sizeof(*sum_h), cudaMemcpyDeviceToHost));
+	bsum[0] += sum_h[0];
+	wsum[0] += sum_h[1];
 
 	return;
 }
 
 
 template<int SPIN_X_WORD>
-int update(int iteration,
-				   dim3 blocks, dim3 threads_per_block, const int reduce_blocks,
-					 unsigned long long *d_black_tiles,
-           unsigned long long *d_white_tiles,
-					 unsigned long long **sum_d,
-           float *d_probabilities,
-					 unsigned long long spins_up,
-					 unsigned long long spins_down,
-					 const unsigned long long seed,
-           const float reduced_alpha,
-           const float reduced_j,
-           const long long grid_height, const long long grid_width, const long long grid_depth,
-				 	 const size_t words_per_row,
-				 	 const size_t total_words)
+float update(int iteration,
+					   dim3 blocks, dim3 threads_per_block, const int reduce_blocks,
+						 unsigned long long *d_black_tiles,
+	           unsigned long long *d_white_tiles,
+						 unsigned long long *sum_d,
+	           float *d_probabilities,
+						 unsigned long long spins_up,
+						 unsigned long long spins_down,
+						 const unsigned long long seed,
+	           const float reduced_alpha,
+	           const float reduced_j,
+	           const long long grid_height, const long long grid_width, const long long grid_depth,
+					 	 const size_t words_per_row,
+					 	 const size_t total_words)
 {
-		float market_coupling;
-		long long magnetisation = -1;
-		if (abs(reduced_alpha) > 1.0e-5) {
-			countSpins(reduce_blocks, total_words, d_black_tiles, d_white_tiles, sum_d, &spins_up, &spins_down);
-			magnetisation = static_cast<double>(spins_up) - static_cast<double>(spins_down);
-			float reduced_magnetisation = abs(magnetisation / static_cast<double>(grid_width * grid_height * grid_depth));
-			market_coupling = -reduced_alpha * reduced_magnetisation;
-		} else {
-			market_coupling = 0.0;
-		}
+		countSpins(reduce_blocks, total_words, d_black_tiles, d_white_tiles, sum_d, &spins_up, &spins_down);
+		double magnetisation = static_cast<double>(spins_up) - static_cast<double>(spins_down);
+		float reduced_magnetisation = magnetisation / static_cast<double>(grid_width * grid_height * grid_depth);
+		float market_coupling = -reduced_alpha * abs(reduced_magnetisation);
+
 		precompute_probabilities(d_probabilities, market_coupling, reduced_j);
 
 		CHECK_CUDA(cudaSetDevice(0));
@@ -410,7 +418,7 @@ int update(int iteration,
 		 reinterpret_cast<ulonglong2 *>(d_black_tiles),
 		 reinterpret_cast<ulonglong2 *>(d_white_tiles));
 
-    return magnetisation;
+    return reduced_magnetisation;
 }
 
 

@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <string>
 #include <iostream>
 #include <fstream>
 #include <iomanip>
@@ -16,9 +17,16 @@ using namespace std;
 #define THREADS 128
 #define BIT_X_SPIN (4)
 
-#define BLOCK_DIMENSION_X_DEFINE (8)
-#define BLOCK_DIMENSION_Y_DEFINE (8)
-#define BLOCK_DIMENSION_Z_DEFINE (4)
+#define BLOCKS_X (4)
+#define BLOCKS_Y (4)
+#define BLOCKS_Z (4)
+
+#define THREADS_X 4
+#define THREADS_Y 4
+#define THREADS_Z 4
+
+#define MAG_FILE_NAME "magnetisation.dat"
+
 
 map<string, string> read_config_file(string config_filename, string delimiter = "=")
 {
@@ -60,17 +68,17 @@ map<string, string> read_config_file(string config_filename, string delimiter = 
 void validate_grid(const long long grid_width, const long long grid_height, const long long grid_depth,
                    const int spin_x_word)
 {
-	if (!grid_width || (grid_width % 2) || ((grid_width / 2) % (2 * spin_x_word * BLOCK_DIMENSION_X_DEFINE))) {
-		fprintf(stderr, "\nPlease specify an grid_width multiple of %d\n\n", 2 * spin_x_word * 2 * BLOCK_DIMENSION_X_DEFINE);
+	if (!grid_width || (grid_width % 2) || ((grid_width / 2) % (2 * spin_x_word * BLOCKS_X))) {
+		fprintf(stderr, "\nPlease specify an grid_width multiple of %d\n\n", 2 * spin_x_word * 2 * BLOCKS_X);
 		exit(EXIT_FAILURE);
 	}
-	if (!grid_height || (grid_height % (BLOCK_DIMENSION_Y_DEFINE))) {
-		fprintf(stderr, "\nPlease specify a grid_height multiple of %d\n\n", BLOCK_DIMENSION_Y_DEFINE);
+	if (!grid_height || (grid_height % (BLOCKS_Y))) {
+		fprintf(stderr, "\nPlease specify a grid_height multiple of %d\n\n", BLOCKS_Y);
 		exit(EXIT_FAILURE);
 	}
-  if (grid_depth % (BLOCK_DIMENSION_Z_DEFINE)) {
+  if (grid_depth % (BLOCKS_Z)) {
     if (grid_depth != 1) {
-      fprintf(stderr, "\nPlease specify a grid_depth multiple of %d\n\n", BLOCK_DIMENSION_Z_DEFINE);
+      fprintf(stderr, "\nPlease specify a grid_depth multiple of %d\n\n", BLOCKS_Z);
       exit(EXIT_FAILURE);
     }
   }
@@ -126,28 +134,29 @@ int main(int argc, char **argv) {
 
   int zblocks, zthreads;
   if (grid_depth != 1) {
-    zblocks = DIV_UP(grid_depth, BLOCK_DIMENSION_Z_DEFINE);
-    zthreads = BLOCK_DIMENSION_Z_DEFINE;
+    zblocks = DIV_UP(grid_depth, BLOCKS_Z);
+    zthreads = BLOCKS_Z;
   } else {
     // even if z dimension is not needed, launch with one z-Block with one thread
-    // this allows blockIdx.z and the like to still be accessible in the kernel
+    // this allows blockIdx.z to still be accessible in the kernel
     // and thus does not require any changes in the existing algorithm
     zblocks = 1;
     zthreads = 1;
   }
   // words_per_row / 2 because each entry in the array has two components
-  dim3 blocks(DIV_UP(words_per_row / 2, BLOCK_DIMENSION_X_DEFINE), DIV_UP(grid_height, BLOCK_DIMENSION_Y_DEFINE), zblocks);
-  dim3 threads_per_block(BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, zthreads);
+  dim3 blocks(DIV_UP(words_per_row / 2, BLOCKS_X), DIV_UP(grid_height, BLOCKS_Y), zblocks);
+  dim3 threads_per_block(BLOCKS_X, BLOCKS_Y, zthreads);
 	const int reduce_blocks = MIN(DIV_UP(total_words, THREADS), (props.maxThreadsPerMultiProcessor / THREADS) * props.multiProcessorCount);
+  const long long total_threads = blocks.x * blocks.y * blocks.z * threads_per_block.x * threads_per_block.y * threads_per_block.z;
 
 	unsigned long long spins_up;
 	unsigned long long spins_down;
-	unsigned long long *sum_d[0];
+	unsigned long long *sum_d;
 
 	CHECK_CUDA(cudaMalloc(&d_spins, total_words * sizeof(*d_spins)));
 	CHECK_CUDA(cudaMemset(d_spins, 0, total_words * sizeof(*d_spins)));
 
-	CHECK_CUDA(cudaMalloc(&sum_d[0], 2 * sizeof(**sum_d)));
+	CHECK_CUDA(cudaMalloc(&sum_d, 2 * sizeof(*sum_d)));
 
 	d_black_tiles = d_spins;
 	d_white_tiles = d_spins + total_words / 2;
@@ -158,6 +167,9 @@ int main(int argc, char **argv) {
 	CHECK_CUDA(cudaEventCreate(&start));
 	CHECK_CUDA(cudaEventCreate(&stop));
 
+  curandStatePhilox4_32_10_t* states;
+  cudaMalloc((void**) &states, total_threads * sizeof(curandStatePhilox4_32_10_t));
+
 	initialise_arrays<unsigned long long>(blocks, threads_per_block, seed, words_per_row / 2, words_per_row / 2 * grid_height,
                                         d_black_tiles, d_white_tiles, percentage_up);
 
@@ -166,12 +178,10 @@ int main(int argc, char **argv) {
 
 	CHECK_CUDA(cudaEventRecord(start, 0));
   int iteration;
-  int global_market = 0;
-  int global_market_before = 0;
+  float global_market = 0;
 	std::ofstream magfile;
-  std::ofstream diff_file;
-	magfile.open("data/magnetisation.dat");
-  diff_file.open("data/magnetisation_difference.dat");
+
+  magfile.open(MAG_FILE_NAME);
 	for(iteration = 0; iteration < total_updates; iteration++) {
 		global_market = update<SPIN_X_WORD>(iteration, blocks, threads_per_block, reduce_blocks,
 					 				      	d_black_tiles, d_white_tiles, sum_d, d_probabilities,
@@ -179,15 +189,10 @@ int main(int argc, char **argv) {
 					 						  	seed, reduced_alpha, reduced_j,
 	         								grid_height, grid_width, grid_depth,
 					 						  	words_per_row, total_words);
-    if (iteration % 10 == 0)
-      diff_file << global_market_before - global_market << ' ' << std::flush;
-    global_market_before = global_market;
-	  if (iteration % 10 == 0)
-		  magfile << global_market << ' ' << std::flush;
-
+    std::cout << global_market << std::endl;
+  	magfile << global_market << std::endl;
 	}
-	magfile.close();
-  diff_file.close();
+  magfile.close();
 
 	CHECK_CUDA(cudaEventRecord(stop, 0));
 	CHECK_CUDA(cudaEventSynchronize(stop));
@@ -196,11 +201,11 @@ int main(int argc, char **argv) {
 
 	printf("Kernel execution time: %.2f s, %.2lf flips/ns \n",
 		elapsed_time * 1.0E-3, static_cast<double>(total_words * SPIN_X_WORD) * iteration / (elapsed_time * 1.0E+6));
-  printf("Final magnetisation: %d\n", global_market);
+  printf("Final magnetisation: %f\n", global_market);
 
 	CHECK_CUDA(cudaFree(d_spins));
 	CHECK_CUDA(cudaFree(d_probabilities));
-	CHECK_CUDA(cudaFree(sum_d[0]));
+	CHECK_CUDA(cudaFree(sum_d));
 
   CHECK_CUDA(cudaSetDevice(0));
   CHECK_CUDA(cudaDeviceReset());

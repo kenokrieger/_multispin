@@ -17,15 +17,16 @@ with open("../multising.conf") as f:
 
 
 if __name__ == "__main__":
-    fig, ax = plt.subplots()
 
-    def animate(i):
-        magnetisation = np.loadtxt("magnetisation.dat", max_rows = 1)
-        idx = np.arange(0, len(magnetisation))
-        plt.cla()
-        ax.plot(idx, magnetisation / LATTICE_SIZE)
-        plt.title("Relative Magnetisation")
+    magnetisation = np.loadtxt("magnetisation.dat")
+    plt.plot(magnetisation[:, 0] / LATTICE_SIZE)
 
-    #ani = FuncAnimation(fig, animate, interval=500)
-    animate(1)
+    plt.title("Relative Magnetisation")
     plt.savefig("magnetisation.png")
+    plt.close()
+
+    # the very first value of the difference is random
+    plt.plot(magnetisation[1:, 1] / LATTICE_SIZE)
+    plt.title("Relative magnetisation difference between updates")
+    plt.savefig("magnetisation_difference.png")
+    plt.close()
