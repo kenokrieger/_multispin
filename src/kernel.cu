@@ -97,9 +97,9 @@ cudaDeviceProp identify_gpu()
 
 char* getDefaultConfigName(char* path)
 {
-  int len = sizeof(path) / sizeof(path[0]);
   int last_slash = 0;
-  for (int idx = len - 1; idx > 0; idx--) {
+  for (int idx = strlen(path) - 1; idx > 0; idx--) {
+    std::cout << path[idx] << std::endl;
     if (path[idx] == '/') {
       last_slash = idx;
       break;
