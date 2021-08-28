@@ -2,3 +2,4 @@ build/*
 !build/.gitkeep
 data/
 crit_temperature/
+*.dat

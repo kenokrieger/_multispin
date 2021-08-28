@@ -4,12 +4,12 @@
 #include <curand_kernel.h>
 #include "cudamacro.h"
 
-#define BIT_X_SPIN (4)
+#define BIT_X_SPIN (3)
 #define THREADS 128
 
-#define BLOCK_DIMENSION_X_DEFINE (8)
+#define BLOCK_DIMENSION_X_DEFINE (4)
 #define BLOCK_DIMENSION_Y_DEFINE (8)
-#define BLOCK_DIMENSION_Z_DEFINE (4)
+#define BLOCK_DIMENSION_Z_DEFINE (8)
 
 enum {C_BLACK, C_WHITE};
 
@@ -31,7 +31,7 @@ __global__  void initialise_traders(const unsigned long long seed, const long lo
 	const int col = blockIdx.x * blockDim.x + threadIdx.x;
 	const int lid = blockIdx.z * blockDim.z + threadIdx.z;
   const long long index = lid * lattice_size + row * number_of_columns + col;
-	const int SPIN_X_WORD = 8 * sizeof(INT_T) / BITXSPIN;
+	const int SPIN_X_WORD = (8 * sizeof(INT_T)) / BITXSPIN;
 
 	curandStatePhilox4_32_10_t rng;
 	curand_init(seed, index, static_cast<long long>(2 * SPIN_X_WORD) * COLOR, &rng);
@@ -124,7 +124,7 @@ __device__ void load_probabilities(const float precomputed_probabilities[][7], f
 }
 
 
-template<int BLOCK_DIMENSION_X, int BITXSPIN, typename INT2_T>
+template<int BLOCK_DIMENSION_X, int BITXSPIN, int SPIN_X_WORD, typename INT2_T>
 __device__ INT2_T compute_neighbor_sum(INT2_T front_neighbor, INT2_T back_neighbor, INT2_T shared_tiles[][BLOCK_DIMENSION_X + 2],
 	 																		 const int tidx, const int tidy, const int shift_left)
 {
@@ -137,11 +137,11 @@ __device__ INT2_T compute_neighbor_sum(INT2_T front_neighbor, INT2_T back_neighb
 	INT2_T horizontal_neighbor = (shift_left) ? shared_tiles[1 + tidy][tidx] : shared_tiles[1 + tidy][2 + tidx];
 
 	if (shift_left) {
-		horizontal_neighbor.x = (center_neighbor.x << BITXSPIN) | (horizontal_neighbor.y >> (8 * sizeof(horizontal_neighbor.y) - BITXSPIN));
-		horizontal_neighbor.y = (center_neighbor.y << BITXSPIN) | (center_neighbor.x >> (8 * sizeof(center_neighbor.x) - BITXSPIN));
+		horizontal_neighbor.x = (center_neighbor.x << BITXSPIN) | (horizontal_neighbor.y >> (SPIN_X_WORD *  (BITXSPIN - 1)));
+		horizontal_neighbor.y = (center_neighbor.y << BITXSPIN) | (center_neighbor.x >> (SPIN_X_WORD *  (BITXSPIN - 1)));
 	} else {
-		horizontal_neighbor.y = (center_neighbor.y >> BITXSPIN) | (horizontal_neighbor.x << (8 * sizeof(horizontal_neighbor.x) - BITXSPIN));
-		horizontal_neighbor.x = (center_neighbor.x >> BITXSPIN) | (center_neighbor.y << (8 * sizeof(center_neighbor.y) - BITXSPIN));
+		horizontal_neighbor.y = (center_neighbor.y >> BITXSPIN) | (horizontal_neighbor.x << (SPIN_X_WORD *  (BITXSPIN - 1)));
+		horizontal_neighbor.x = (center_neighbor.x >> BITXSPIN) | (center_neighbor.y << (SPIN_X_WORD *  (BITXSPIN - 1)));
 	}
 
 	// this basically sums over all spins/word in parallel
@@ -151,7 +151,7 @@ __device__ INT2_T compute_neighbor_sum(INT2_T front_neighbor, INT2_T back_neighb
 	return center_neighbor;
 }
 
-template<int BLOCK_DIMENSION_X, int BITXSPIN, typename INT2_T>
+template<int BLOCK_DIMENSION_X, int BITXSPIN, int SPIN_X_WORD, typename INT2_T>
 __device__ INT2_T compute_neighbor_sum(bool front_neighbor, bool back_neighbor, INT2_T shared_tiles[][BLOCK_DIMENSION_X + 2],
 	 																		 const int tidx, const int tidy, const int shift_left)
 {
@@ -185,8 +185,8 @@ __device__ INT2_T flip_spins(curandStatePhilox4_32_10_t rng, INT2_T target, INT2
 	const INT_T ONE = static_cast<INT_T>(1);
 	for(int spin_position = 0; spin_position < 8 * sizeof(INT_T); spin_position += BITXSPIN) {
 
-		const int2 spin = make_int2((target.x >> spin_position) & 0xF, (target.y >> spin_position) & 0xF);
-		const int2 sum = make_int2((parallel_sum.x >> spin_position) & 0xF, (parallel_sum.y >> spin_position) & 0xF);
+		const int2 spin = make_int2((target.x >> spin_position) & 0x7, (target.y >> spin_position) & 0x7);
+		const int2 sum = make_int2((parallel_sum.x >> spin_position) & 0x7, (parallel_sum.y >> spin_position) & 0x7);
 
 		if (curand_uniform(&rng) <= shared_probabilities[spin.x][sum.x]) {
 			target.x |= ONE << spin_position;
@@ -213,7 +213,7 @@ __global__ void update_strategies(const unsigned long long seed, const int numbe
 		       const INT2_T *__restrict__ checkerboard_agents,
 		             INT2_T *__restrict__ traders)
 {
-	const int SPIN_X_WORD = 8 * sizeof(INT_T) / BITXSPIN;
+	const int SPIN_X_WORD = (8 * sizeof(INT_T)) / BITXSPIN;
 	const int tidx = threadIdx.x;
 	const int tidy = threadIdx.y;
 
@@ -242,11 +242,11 @@ __global__ void update_strategies(const unsigned long long seed, const int numbe
 		const long long front_index = ((lid + 1 > grid_depth - 1) ? 0 : lid + 1) * number_of_columns * grid_height + row * number_of_columns + col;
 		INT2_T front_neighbor = checkerboard_agents[front_index];
 		INT2_T back_neighbor = checkerboard_agents[back_index];
-		parallel_sum = compute_neighbor_sum<BLOCK_DIMENSION_X, BITXSPIN, INT2_T>(front_neighbor, back_neighbor, shared_tiles, tidx, tidy, shift_left);
+		parallel_sum = compute_neighbor_sum<BLOCK_DIMENSION_X, BITXSPIN, SPIN_X_WORD, INT2_T>(front_neighbor, back_neighbor, shared_tiles, tidx, tidy, shift_left);
 	} else {
 		bool front_neighbor = false;
 		bool back_neighbor = false;
-		parallel_sum = compute_neighbor_sum<BLOCK_DIMENSION_X, BITXSPIN, INT2_T>(front_neighbor, back_neighbor, shared_tiles, tidx, tidy, shift_left);
+		parallel_sum = compute_neighbor_sum<BLOCK_DIMENSION_X, BITXSPIN, SPIN_X_WORD, INT2_T>(front_neighbor, back_neighbor, shared_tiles, tidx, tidy, shift_left);
 	}
 
 	curandStatePhilox4_32_10_t rng;
@@ -281,8 +281,8 @@ __device__ __forceinline__ T __block_sum(T traders)
 {
 	__shared__ T sh[BLOCK_DIMENSION_X / WSIZE];
 
-	const int lid = threadIdx.x%WSIZE;
-	const int wid = threadIdx.x/WSIZE;
+	const int lid = threadIdx.x % WSIZE;
+	const int wid = threadIdx.x / WSIZE;
 
 	#pragma unroll
 	for(int i = WSIZE/2; i; i >>= 1) {
@@ -295,7 +295,7 @@ __device__ __forceinline__ T __block_sum(T traders)
 		traders = (lid < (BLOCK_DIMENSION_X / WSIZE)) ? sh[lid] : 0;
 
 		#pragma unroll
-		for(int i = (BLOCK_DIMENSION_X/WSIZE)/2; i; i >>= 1) {
+		for(int i = (BLOCK_DIMENSION_X / WSIZE) / 2; i; i >>= 1) {
 			traders += __shfl_down_sync(0xFFFFFFFF, traders, i);
 		}
 	}
@@ -311,7 +311,7 @@ __global__ void getMagn_k(const long long n,
 			                    SUM_T *__restrict__ sum)
 {
 	// to be optimized
-	const int SPIN_X_WORD = 8 * sizeof(INT_T) / BITXSPIN;
+	const int SPIN_X_WORD = (8 * sizeof(INT_T)) / BITXSPIN;
 
 	const long long nth = static_cast<long long>(blockDim.x) * gridDim.x;
 	const long long thread_id = static_cast<long long>(blockDim.x) * blockIdx.x + threadIdx.x;
