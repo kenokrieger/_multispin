@@ -24,40 +24,29 @@ __device__ __forceinline__ ulonglong2 __custom_make_int2(const unsigned long lon
 
 template<int BITXSPIN, int COLOR, typename INT_T, typename INT2_T>
 __global__  void initialise_traders(const unsigned long long seed, const long long number_of_columns, const long long lattice_size,
-																	  INT2_T *__restrict__ traders, curandStatePhilox4_32_10_t* rng,
+																	  INT2_T *__restrict__ traders,
 																		float percentage = 0.5f)
 {
-	const int stridex = grid_width / gridDim.x; // prob. not correct so far
-	const int stridey = grid_height / gridDim.y;
-	const int stridez = grid_depth / gridDim.z;
-	const int start_row = blockIdx.y * blockDim.y + threadIdx.y;
-	const int start_col = blockIdx.x * blockDim.x + threadIdx.x;
-	const int start_lid = blockIdx.z * blockDim.z + threadIdx.z;
-	const long long thread_id = start_lid * lattice_size + start_row * number_of_columns + start_col;
-	curand_init(seed, thread_id, 0, &rng[thread_id]);
-	for (int xloop = stridex * start_col; xloop < stridex * (start_col + 1); xloop++) {
-		for (int yloop = stridey * start_row; yloop < stridey * (start_row + 1); yloop++) {
-			for (int zloop = stridez * start_lid; zloop < stridez * (start_lid + 1); zloop++) {
-				// main thread function
-				const long long index = zloop * lattice_size + yloop * number_of_columns + xloop;
-				const int SPIN_X_WORD = 8 * sizeof(INT_T) / BITXSPIN;
+	const int row = blockIdx.y * blockDim.y + threadIdx.y;
+	const int col = blockIdx.x * blockDim.x + threadIdx.x;
+	const int lid = blockIdx.z * blockDim.z + threadIdx.z;
+  const long long index = lid * lattice_size + row * number_of_columns + col;
+	const int SPIN_X_WORD = 8 * sizeof(INT_T) / BITXSPIN;
 
-			  traders[index] = __custom_make_int2(INT_T(0), INT_T(0));
-				for(int spin_position = 0; spin_position < 8 * sizeof(INT_T); spin_position += BITXSPIN) {
-					// The two if clauses are not identical since curand_uniform()
-					// returns a different number on each invokation
-					if (curand_uniform(&rng[thread_id]) < percentage) {
-						traders[index].x |= INT_T(1) << spin_position;
-					}
-					if (curand_uniform(&rng[thread_id]) < percentage) {
-						traders[index].y |= INT_T(1) << spin_position;
-					}
-				}
-			}
+	curandStatePhilox4_32_10_t rng;
+	curand_init(seed, index, static_cast<long long>(2 * SPIN_X_WORD) * COLOR, &rng);
+
+  traders[index] = __custom_make_int2(INT_T(0), INT_T(0));
+	for(int spin_position = 0; spin_position < 8 * sizeof(INT_T); spin_position += BITXSPIN) {
+		// The two if clauses are not identical since curand_uniform()
+		// returns a different number on each invokation
+		if (curand_uniform(&rng) < percentage) {
+			traders[index].x |= INT_T(1) << spin_position;
+		}
+		if (curand_uniform(&rng) < percentage) {
+			traders[index].y |= INT_T(1) << spin_position;
 		}
 	}
-
-
 	return;
 }
 
@@ -395,7 +384,7 @@ float update(int iteration,
 					 	 const size_t words_per_row,
 					 	 const size_t total_words)
 {
-		countSpins(reduce_blocks, total_words, d_black_tiles, d_white_tiles, sum_d, &spins_up, &spins_down);
+		countSpins(reduce_blocks, total_words, d_black_tiles, sum_d, &spins_up, &spins_down);
 		double magnetisation = static_cast<double>(spins_up) - static_cast<double>(spins_down);
 		float reduced_magnetisation = magnetisation / static_cast<double>(grid_width * grid_height * grid_depth);
 		float market_coupling = -reduced_alpha * abs(reduced_magnetisation);

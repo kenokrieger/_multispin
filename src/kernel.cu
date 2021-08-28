@@ -17,13 +17,10 @@ using namespace std;
 #define THREADS 128
 #define BIT_X_SPIN (4)
 
-#define BLOCKS_X (4)
-#define BLOCKS_Y (4)
+#define BLOCKS_X (8)
+#define BLOCKS_Y (8)
 #define BLOCKS_Z (4)
 
-#define THREADS_X 4
-#define THREADS_Y 4
-#define THREADS_Z 4
 
 #define MAG_FILE_NAME "magnetisation.dat"
 
