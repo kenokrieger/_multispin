@@ -17,9 +17,9 @@ using namespace std;
 #define THREADS 128
 #define BIT_X_SPIN (4)
 
-#define BLOCKS_X (4)
-#define BLOCKS_Y (8)
-#define BLOCKS_Z (8)
+#define THREADS_X (4)
+#define THREADS_Y (8)
+#define THREADS_Z (8)
 
 
 #define MAG_FILE_NAME "magnetisation.dat"
@@ -65,17 +65,17 @@ map<string, string> read_config_file(string config_filename, string delimiter = 
 void validate_grid(const long long grid_width, const long long grid_height, const long long grid_depth,
                    const int spin_x_word)
 {
-	if (!grid_width || (grid_width % 2) || ((grid_width / 2) % (2 * spin_x_word * BLOCKS_X))) {
-		fprintf(stderr, "\nPlease specify an grid_width multiple of %d\n\n", 2 * spin_x_word * 2 * BLOCKS_X);
+	if (!grid_width || (grid_width % 2) || ((grid_width / 2) % (2 * spin_x_word * THREADS_X))) {
+		fprintf(stderr, "\nPlease specify an grid_width multiple of %d\n\n", 2 * spin_x_word * 2 * THREADS_X);
 		exit(EXIT_FAILURE);
 	}
-	if (!grid_height || (grid_height % (BLOCKS_Y))) {
-		fprintf(stderr, "\nPlease specify a grid_height multiple of %d\n\n", BLOCKS_Y);
+	if (!grid_height || (grid_height % (THREADS_Y))) {
+		fprintf(stderr, "\nPlease specify a grid_height multiple of %d\n\n", THREADS_Y);
 		exit(EXIT_FAILURE);
 	}
-  if (grid_depth % (BLOCKS_Z)) {
+  if (grid_depth % (THREADS_Z)) {
     if (grid_depth != 1) {
-      fprintf(stderr, "\nPlease specify a grid_depth multiple of %d\n\n", BLOCKS_Z);
+      fprintf(stderr, "\nPlease specify a grid_depth multiple of %d\n\n", THREADS_Z);
       exit(EXIT_FAILURE);
     }
   }
@@ -99,7 +99,6 @@ char* getDefaultConfigName(char* path)
 {
   int last_slash = 0;
   for (int idx = strlen(path) - 1; idx > 0; idx--) {
-    std::cout << path[idx] << std::endl;
     if (path[idx] == '/') {
       last_slash = idx;
       break;
@@ -148,8 +147,8 @@ int main(int argc, char **argv) {
 
   int zblocks, zthreads;
   if (grid_depth != 1) {
-    zblocks = DIV_UP(grid_depth, BLOCKS_Z);
-    zthreads = BLOCKS_Z;
+    zblocks = DIV_UP(grid_depth, THREADS_Z);
+    zthreads = THREADS_Z;
   } else {
     // even if z dimension is not needed, launch with one z-Block with one thread
     // this allows blockIdx.z to still be accessible in the kernel
@@ -158,8 +157,8 @@ int main(int argc, char **argv) {
     zthreads = 1;
   }
   // words_per_row / 2 because each entry in the array has two components
-  dim3 blocks(DIV_UP(words_per_row / 2, BLOCKS_X), DIV_UP(grid_height, BLOCKS_Y), zblocks);
-  dim3 threads_per_block(BLOCKS_X, BLOCKS_Y, zthreads);
+  dim3 blocks(DIV_UP(words_per_row / 2, THREADS_X), DIV_UP(grid_height, THREADS_Y), zblocks);
+  dim3 threads_per_block(THREADS_X, THREADS_Y, zthreads);
 	const int reduce_blocks = MIN(DIV_UP(total_words, THREADS), (props.maxThreadsPerMultiProcessor / THREADS) * props.multiProcessorCount);
   const long long total_threads = blocks.x * blocks.y * blocks.z * threads_per_block.x * threads_per_block.y * threads_per_block.z;
 
@@ -181,8 +180,8 @@ int main(int argc, char **argv) {
 	CHECK_CUDA(cudaEventCreate(&start));
 	CHECK_CUDA(cudaEventCreate(&stop));
 
-  curandStatePhilox4_32_10_t* states;
-  cudaMalloc((void**) &states, total_threads * sizeof(curandStatePhilox4_32_10_t));
+  //curandStatePhilox4_32_10_t* states;
+  //cudaMalloc((void**) &states, total_threads * sizeof(curandStatePhilox4_32_10_t));
 
 	initialise_arrays<unsigned long long>(blocks, threads_per_block, seed, words_per_row / 2, words_per_row / 2 * grid_height,
                                         d_black_tiles, d_white_tiles, percentage_up);
