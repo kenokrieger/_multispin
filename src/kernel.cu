@@ -95,6 +95,22 @@ cudaDeviceProp identify_gpu()
 }
 
 
+char* getDefaultConfigName(char* path)
+{
+  int len = sizeof(path) / sizeof(path[0]);
+  int last_slash = 0;
+  for (int idx = len - 1; idx > 0; idx--) {
+    if (path[idx] == '/') {
+      last_slash = idx;
+      break;
+    }
+  }
+  char *config_name = (char *) malloc(strlen(path) + 5 * sizeof(char));
+  strcat(config_name, path + last_slash + 1);
+  strcat(config_name, ".conf");
+  return config_name;
+}
+
 int main(int argc, char **argv) {
 
 	unsigned long long *d_spins = NULL;
@@ -106,7 +122,7 @@ int main(int argc, char **argv) {
 	cudaEvent_t start, stop;
   float elapsed_time;
 
-	string config_filename = (argc == 1) ? "multising.conf" : argv[1];
+	string config_filename = (argc == 1) ? getDefaultConfigName(argv[0]) : argv[1];
   map<string, string> config = read_config_file(config_filename);
 
   const long long grid_height = std::stoll(config["grid_height"]);
