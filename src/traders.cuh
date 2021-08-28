@@ -23,7 +23,9 @@ __device__ __forceinline__ ulonglong2 __custom_make_int2(const unsigned long lon
 
 
 template<int BITXSPIN, int COLOR, typename INT_T, typename INT2_T>
-__global__  void initialise_traders(const unsigned long long seed, const long long number_of_columns, const long long lattice_size,
+__global__  void initialise_traders(const unsigned long long seed,
+																		const long long number_of_columns,
+																		const long long lattice_size,
 																	  INT2_T *__restrict__ traders,
 																		float percentage = 0.5f)
 {
@@ -53,9 +55,11 @@ __global__  void initialise_traders(const unsigned long long seed, const long lo
 
 template<typename INT_T, typename INT2_T>
 void initialise_arrays(dim3 blocks, dim3 threads_per_block,
-								 			 const unsigned long long seed, const unsigned long long number_of_columns,
+								 			 const unsigned long long seed,
+											 const unsigned long long number_of_columns,
 											 const unsigned long long lattice_size,
-								 		 	 INT2_T *__restrict__ d_black_tiles, INT2_T *__restrict__ d_white_tiles,
+								 		 	 INT2_T *__restrict__ d_black_tiles,
+											 INT2_T *__restrict__ d_white_tiles,
 								 		 	 float percentage = 0.5f)
 {
 		CHECK_CUDA(cudaSetDevice(0));
@@ -72,8 +76,10 @@ void initialise_arrays(dim3 blocks, dim3 threads_per_block,
 
 
 template<int TILE_SIZE_X, int TILE_SIZE_Y, typename INT2_T>
-__device__ void load_tiles(const int grid_width, const int grid_height, const long long number_of_columns,
-                           const INT2_T *__restrict__ traders, INT2_T tile[][TILE_SIZE_X + 2])
+__device__ void load_tiles(const int grid_width, const int grid_height,
+	 												 const long long number_of_columns,
+                           const INT2_T *__restrict__ traders,
+													 INT2_T tile[][TILE_SIZE_X + 2])
 {
 	const int tidx = threadIdx.x;
 	const int tidy = threadIdx.y;
@@ -87,25 +93,30 @@ __device__ void load_tiles(const int grid_width, const int grid_height, const lo
 	tile[1 + tidy][1 + tidx] = traders[lattice_offset + row * number_of_columns + col];
 
 	if (tidy == 0) {
-		row = (tile_start_y % grid_height) == 0 ? tile_start_y + grid_height - 1 : tile_start_y - 1;
+		row = (tile_start_y % grid_height) == 0 ?
+				tile_start_y + grid_height - 1 : tile_start_y - 1;
 		tile[0][1 + tidx] = traders[lattice_offset + row * number_of_columns + col];
 
-		row = ((tile_start_y + TILE_SIZE_Y) % grid_height) == 0 ? tile_start_y + TILE_SIZE_Y - grid_height : tile_start_y + TILE_SIZE_Y;
+		row = ((tile_start_y + TILE_SIZE_Y) % grid_height) == 0 ?
+				tile_start_y + TILE_SIZE_Y - grid_height : tile_start_y + TILE_SIZE_Y;
 		tile[1 + TILE_SIZE_Y][1 + tidx] = traders[lattice_offset + row * number_of_columns + col];
 
 		row = tile_start_y + tidx;
-		col = (tile_start_x % grid_width) == 0 ? tile_start_x + grid_width - 1 : tile_start_x - 1;
+		col = (tile_start_x % grid_width) == 0 ?
+	  		tile_start_x + grid_width - 1 : tile_start_x - 1;
 		tile[1 + tidx][0] = traders[lattice_offset + row * number_of_columns + col];
 
 		row = tile_start_y + tidx;
-		col = ((tile_start_x + TILE_SIZE_X) % grid_width) == 0 ? tile_start_x + TILE_SIZE_X - grid_width : tile_start_x + TILE_SIZE_X;
+		col = ((tile_start_x + TILE_SIZE_X) % grid_width) == 0 ?
+				tile_start_x + TILE_SIZE_X - grid_width : tile_start_x + TILE_SIZE_X;
 		tile[1 + tidx][1 + TILE_SIZE_X] = traders[lattice_offset + row * number_of_columns + col];
 	}
 	return;
 }
 
 
-__device__ void load_probabilities(const float precomputed_probabilities[][7], float shared_probabilities[][7])
+__device__ void load_probabilities(const float precomputed_probabilities[][7],
+	 																 float shared_probabilities[][7])
 {
   // load precomputed exponentials into shared memory.
   // in case a threads_per_block consists of less than 2 * 7 threads
@@ -125,8 +136,10 @@ __device__ void load_probabilities(const float precomputed_probabilities[][7], f
 
 
 template<int BLOCK_DIMENSION_X, int BITXSPIN, int SPIN_X_WORD, typename INT2_T>
-__device__ INT2_T compute_neighbor_sum(INT2_T front_neighbor, INT2_T back_neighbor, INT2_T shared_tiles[][BLOCK_DIMENSION_X + 2],
-	 																		 const int tidx, const int tidy, const int shift_left)
+__device__ INT2_T compute_neighbor_sum(INT2_T front_neighbor, INT2_T back_neighbor,
+	 																		 INT2_T shared_tiles[][BLOCK_DIMENSION_X + 2],
+	 																		 const int tidx, const int tidy,
+																			 const int shift_left)
 {
 	// three nearest neighbors
 	INT2_T upper_neighbor  = shared_tiles[    tidy][1 + tidx];
@@ -152,8 +165,10 @@ __device__ INT2_T compute_neighbor_sum(INT2_T front_neighbor, INT2_T back_neighb
 }
 
 template<int BLOCK_DIMENSION_X, int BITXSPIN, int SPIN_X_WORD, typename INT2_T>
-__device__ INT2_T compute_neighbor_sum(bool front_neighbor, bool back_neighbor, INT2_T shared_tiles[][BLOCK_DIMENSION_X + 2],
-	 																		 const int tidx, const int tidy, const int shift_left)
+__device__ INT2_T compute_neighbor_sum(bool front_neighbor, bool back_neighbor,
+	 																		 INT2_T shared_tiles[][BLOCK_DIMENSION_X + 2],
+	 																		 const int tidx, const int tidy,
+																			 const int shift_left)
 {
 	// three nearest neighbors
 	INT2_T upper_neighbor  = shared_tiles[    tidy][1 + tidx];
@@ -180,7 +195,9 @@ __device__ INT2_T compute_neighbor_sum(bool front_neighbor, bool back_neighbor, 
 
 
 template<int BITXSPIN, typename INT_T, typename INT2_T>
-__device__ INT2_T flip_spins(curandStatePhilox4_32_10_t rng, INT2_T target, INT2_T parallel_sum, const float shared_probabilities[][7])
+__device__ INT2_T flip_spins(curandStatePhilox4_32_10_t rng,
+	 													 INT2_T target, INT2_T parallel_sum,
+														 const float shared_probabilities[][7])
 {
 	const INT_T ONE = static_cast<INT_T>(1);
 	for(int spin_position = 0; spin_position < 8 * sizeof(INT_T); spin_position += BITXSPIN) {
@@ -259,7 +276,8 @@ __global__ void update_strategies(const unsigned long long seed, const int numbe
 }
 
 
-void precompute_probabilities(float* probabilities, const float market_coupling, const float reduced_j)
+void precompute_probabilities(float* probabilities, const float market_coupling,
+	 														const float reduced_j)
 {
 		float h_probabilities[2][7];
 
