@@ -90,18 +90,15 @@ allows for each spin to be resembled by an individual bit. An unsigned long
 long (with size of 64 bits), for example, can store 16 spins. The remaining
 bits are left untouched to enable a fast computation of the nearest neighbors
 sum. Technically, only 3 bits are needed to store values up to 7, but that would
-lead to more complicated edge cases. In the figure below, an example is shown
-where four spins are stored in a variable indexed by x and y.
-
-<img src="images/lattice_decomposition.png" alt="3d metropolis algorithm" height="350">
+lead to more complicated edge cases.
 
 To compute the sum of the four nearest neighbors in the plane, the neighbors of
-the new variable can be used. However one entry needs to be altered slightly
+the compacted spins can be used. However one entry needs to be altered slightly
 depending on color and row parity. By summing over the neighbors, all four nearest
 neighbor sums are basically computed in parallel. The neighbors in the front and
 back lattices do not need to be altered and can simply be added to the sum.
 
-<img src="images/spin_flipping.png" alt="3d metropolis algorithm" height="350">
+<img src="images/multispin_neighbors.png" alt="3d metropolis algorithm" height="350">
 
 ## Usage
 
@@ -143,6 +140,10 @@ beta = 0.6
 init_up = 0.5
 ```
 
-For alpha = 0 this model resembles the standard Ising model. You may also
-specify grid_depth = 1 to run the simulation in two dimensions with four nearest
-neighbors.
+For alpha = 0 this model resembles the standard Ising model.
+
+### Unix Scripts
+
+The script 'measure' is a unix shell script to help with using the binary for
+actual measurements. When executing the script will prompt you for a session id
+under which all data generated in that session will be stored.
