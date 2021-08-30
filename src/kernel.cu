@@ -189,7 +189,7 @@ int main(int argc, char **argv) {
 					 						  	seed, reduced_alpha, reduced_j,
 	         								grid_height, grid_width, grid_depth,
 					 						  	words_per_row, total_words);
-    std::cout << "\r" << global_market;
+    std::cout << "\r" << global_market << std::flush;
   	magfile << global_market << std::endl;
 	}
   std::cout << std::endl;
