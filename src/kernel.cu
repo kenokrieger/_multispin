@@ -189,9 +189,10 @@ int main(int argc, char **argv) {
 					 						  	seed, reduced_alpha, reduced_j,
 	         								grid_height, grid_width, grid_depth,
 					 						  	words_per_row, total_words);
-    std::cout << global_market << std::endl;
+    std::cout << "\r" << global_market;
   	magfile << global_market << std::endl;
 	}
+  std::cout << std::endl;
   magfile.close();
 
 	CHECK_CUDA(cudaEventRecord(stop, 0));

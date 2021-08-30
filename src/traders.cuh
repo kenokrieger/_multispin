@@ -106,18 +106,18 @@ __device__ void load_tiles(const int grid_width, const int grid_height, const lo
 }
 
 
-__device__ void load_probabilities(const float precomputed_probabilities[][7], float shared_probabilities[][7])
+__device__ void load_probabilities(const float *precomputed_probabilities, float shared_probabilities[][7])
 {
   // load precomputed exponentials into shared memory.
   // in case a threads_per_block consists of less than 2 * 7 threads
   // multiple iterations in each thread are needed
-  // otherwise loops will only trigger once
+  //in most cases loops will only trigger once
   #pragma unroll
-  for(int i = 0; i < 2; i += blockDim.x) {
+  for(int i = 0; i < 2; i += blockDim.y) {
     #pragma unroll
-    for(int j = 0; j < 7; j += blockDim.y) {
+    for(int j = 0; j < 7; j += blockDim.x) {
       if (i + threadIdx.y < 2 && j + threadIdx.x < 7) {
-        shared_probabilities[i + threadIdx.y][j + threadIdx.x] = precomputed_probabilities[i + threadIdx.y][j + threadIdx.x];
+        shared_probabilities[i + threadIdx.y][j + threadIdx.x] = precomputed_probabilities[(i + threadIdx.y) * 7 + j + threadIdx.x];
       }
     }
   }
@@ -125,7 +125,7 @@ __device__ void load_probabilities(const float precomputed_probabilities[][7], f
 }
 
 
-template<int BLOCK_DIMENSION_X, int BITXSPIN, typename INT2_T>
+template<int BLOCK_DIMENSION_X, int BITXSPIN, typename INT_T, typename INT2_T>
 __device__ INT2_T compute_neighbor_sum(INT2_T front_neighbor, INT2_T back_neighbor, INT2_T shared_tiles[][BLOCK_DIMENSION_X + 2],
 	 																		 const int tidx, const int tidy, const int shift_left)
 {
@@ -154,21 +154,20 @@ __device__ INT2_T compute_neighbor_sum(INT2_T front_neighbor, INT2_T back_neighb
 
 
 template<int BITXSPIN, typename INT_T, typename INT2_T>
-__device__ INT2_T flip_spins(int *sums, curandStatePhilox4_32_10_t rng, INT2_T target, INT2_T parallel_sum, const float shared_probabilities[][7])
+__device__ INT2_T flip_spins(curandStatePhilox4_32_10_t rng, INT2_T target, INT2_T parallel_sum, const float shared_probabilities[][7])
 {
 	const INT_T ONE = static_cast<INT_T>(1);
 	for(int spin_position = 0; spin_position < 8 * sizeof(INT_T); spin_position += BITXSPIN) {
 
 		const int2 spin = make_int2((target.x >> spin_position) & 0xF, (target.y >> spin_position) & 0xF);
 		const int2 sum = make_int2((parallel_sum.x >> spin_position) & 0xF, (parallel_sum.y >> spin_position) & 0xF);
-		sums[16 * threadIdx.x + spin_position / 4] = sum.x;
-		if (curand_uniform(&rng) < shared_probabilities[spin.x][sum.x]) {
-			target.x |= ONE << spin_position;
+		if (curand_uniform(&rng) <= shared_probabilities[spin.x][sum.x]) {
+			target.x |= (ONE << spin_position);
 		} else {
 			target.x &= ~(ONE << spin_position);
 		}
-		if (curand_uniform(&rng) < shared_probabilities[spin.y][sum.y]) {
-			target.y |= ONE << spin_position;
+		if (curand_uniform(&rng) <= shared_probabilities[spin.y][sum.y]) {
+			target.y |= (ONE << spin_position);
 		} else {
 			target.y &= ~(ONE << spin_position);
 		}
@@ -178,12 +177,12 @@ __device__ INT2_T flip_spins(int *sums, curandStatePhilox4_32_10_t rng, INT2_T t
 
 
 template<int BLOCK_DIMENSION_X, int BLOCK_DIMENSION_Y, int BLOCK_DIMENSION_Z, int BITXSPIN, int COLOR, typename INT_T, typename INT2_T>
-__global__ void update_strategies(int *sums, const unsigned long long seed, const int number_of_previous_iterations,
+__global__ void update_strategies(const unsigned long long seed, const int number_of_previous_iterations,
 		       const int grid_width, // lattice width of one color in words
 		       const int grid_height, // lattice height (not in words)
 					 const int grid_depth,
 		       const long long number_of_columns,
-		       const float precomputed_probabilities[][7],
+		       const float *precomputed_probabilities,
 		       const INT2_T *__restrict__ checkerboard_agents,
 		             INT2_T *__restrict__ traders)
 {
@@ -197,11 +196,10 @@ __global__ void update_strategies(int *sums, const unsigned long long seed, cons
   (grid_width, grid_height, number_of_columns, checkerboard_agents, shared_tiles);
 
 	__shared__ float shared_probabilities[2][7];
-  load_probabilities(precomputed_probabilities, shared_probabilities);
+	load_probabilities(precomputed_probabilities, shared_probabilities);
 
 	__syncthreads();
 
-	INT2_T parallel_sum;
 
 	const int row = blockIdx.y * BLOCK_DIMENSION_Y + tidy;
 	const int col = blockIdx.x * BLOCK_DIMENSION_X + tidx;
@@ -210,16 +208,16 @@ __global__ void update_strategies(int *sums, const unsigned long long seed, cons
 	const int shift_left = (first_tile_black) ? !(row % 2) : (row % 2);
 	const long long index = lid * number_of_columns * grid_height + row * number_of_columns + col;
 
-	INT2_T target = traders[index];
 	const long long back_index = ((lid - 1 < 0) ? grid_depth - 1 : lid - 1) * number_of_columns * grid_height + row * number_of_columns + col;
 	const long long front_index = ((lid + 1 > grid_depth - 1) ? 0 : lid + 1) * number_of_columns * grid_height + row * number_of_columns + col;
 	INT2_T front_neighbor = checkerboard_agents[front_index];
 	INT2_T back_neighbor = checkerboard_agents[back_index];
-	parallel_sum = compute_neighbor_sum<BLOCK_DIMENSION_X, BITXSPIN, INT2_T>(front_neighbor, back_neighbor, shared_tiles[tidz], tidx, tidy, shift_left);
+	INT2_T parallel_sum = compute_neighbor_sum<BLOCK_DIMENSION_X, BITXSPIN, INT2_T>(front_neighbor, back_neighbor, shared_tiles[tidz], tidx, tidy, shift_left);
 
 	curandStatePhilox4_32_10_t rng;
 	curand_init(seed, index, static_cast<long long>(2 * SPIN_X_WORD) * (2 * number_of_previous_iterations + COLOR), &rng);
-	traders[index] = flip_spins<BITXSPIN, INT_T, INT2_T>(sums, rng, target, parallel_sum, shared_probabilities);
+	INT2_T target = traders[index];
+	traders[index] = flip_spins<BITXSPIN, INT_T, INT2_T>(rng, target, parallel_sum, shared_probabilities);
 
 	return;
 }
@@ -227,16 +225,16 @@ __global__ void update_strategies(int *sums, const unsigned long long seed, cons
 
 void precompute_probabilities(float* probabilities, const float market_coupling, const float reduced_j)
 {
-		float h_probabilities[2][7];
+		float h_probabilities[14];
 
 		for (int spin = 0; spin < 2; spin++) {
 			for (int idx = 0; idx < 7; idx++) {
 				int neighbor_sum = 2 * idx - 6;
 				float field = reduced_j * neighbor_sum + market_coupling * ((spin) ? 1 : -1);
-				h_probabilities[spin][idx] = 1 / (1 + exp(field));
+				h_probabilities[spin * 7 + idx] = 1.0 / (1.0 + exp(field));
 			}
 		}
-		CHECK_CUDA(cudaMemcpy(probabilities, &h_probabilities, 2 * 7 * sizeof(**h_probabilities), cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(probabilities, h_probabilities, 2 * 7 * sizeof(*h_probabilities), cudaMemcpyHostToDevice));
 		return;
 }
 
@@ -247,8 +245,8 @@ __device__ __forceinline__ T __block_sum(T traders)
 {
 	__shared__ T sh[BLOCK_DIMENSION_X / WSIZE];
 
-	const int lid = threadIdx.x%WSIZE;
-	const int wid = threadIdx.x/WSIZE;
+	const int lid = threadIdx.x % WSIZE;
+	const int wid = threadIdx.x / WSIZE;
 
 	#pragma unroll
 	for(int i = WSIZE/2; i; i >>= 1) {
@@ -390,43 +388,28 @@ float update(int iteration,
 					 	 const size_t words_per_row,
 					 	 const size_t total_words)
 {
-		int *h_sums = (int *) malloc(16 * 4 * sizeof(int));
-		for (int i = 0; i < 16 * 4; i++) {
-			h_sums[i] = -1;
-		}
-		int *sums;
-		CHECK_CUDA(cudaMalloc(&sums, 16 * 4 * sizeof(int)));
 		countSpins(reduce_blocks, total_words, d_black_tiles, d_sum, &spins_up, &spins_down);
 		double magnetisation = static_cast<double>(spins_up) - static_cast<double>(spins_down);
 		float reduced_magnetisation = magnetisation / static_cast<double>(grid_width * grid_height * grid_depth);
 		float market_coupling = -reduced_alpha * abs(reduced_magnetisation);
-
 		precompute_probabilities(d_probabilities, market_coupling, reduced_j);
 
 		CHECK_CUDA(cudaSetDevice(0));
 		update_strategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BLOCK_DIMENSION_Z_DEFINE, BIT_X_SPIN, C_BLACK, unsigned long long>
 		<<<blocks, threads_per_block>>>
-		(sums, seed, iteration + 1, (grid_width / 2) / SPIN_X_WORD / 2, grid_height, grid_depth, words_per_row / 2,
-		 reinterpret_cast<float (*)[7]>(d_probabilities),
+		(seed, iteration + 1, (grid_width / 2) / SPIN_X_WORD / 2, grid_height, grid_depth, words_per_row / 2,
+		 d_probabilities,
 		 reinterpret_cast<ulonglong2 *>(d_white_tiles),
 		 reinterpret_cast<ulonglong2 *>(d_black_tiles));
 
 		CHECK_CUDA(cudaSetDevice(0));
 		update_strategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BLOCK_DIMENSION_Z_DEFINE, BIT_X_SPIN, C_WHITE, unsigned long long>
 		<<<blocks, threads_per_block>>>
-		(sums, seed, iteration + 1, (grid_width / 2) / SPIN_X_WORD / 2, grid_height, grid_depth, words_per_row / 2,
-		 reinterpret_cast<float (*)[7]>(d_probabilities),
+		(seed, iteration + 1, (grid_width / 2) / SPIN_X_WORD / 2, grid_height, grid_depth, words_per_row / 2,
+		 d_probabilities,
 		 reinterpret_cast<ulonglong2 *>(d_black_tiles),
 		 reinterpret_cast<ulonglong2 *>(d_white_tiles));
 
-	 	dumpLattice(iteration, grid_height, words_per_row, total_words,
-			 					d_black_tiles);
-
-CHECK_CUDA(cudaMemcpy(h_sums, sums, 4 * 16 * sizeof(int), cudaMemcpyDeviceToHost));
-		for (int i = 0; i < 16 * 4; i++) {
-			std::cout << h_sums[i] << " ";
-		}
-		std::cout << std::endl;
     return reduced_magnetisation;
 }
 
