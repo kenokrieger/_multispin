@@ -221,7 +221,7 @@ __global__ void update_strategies(const unsigned long long seed, const int numbe
 	const long long front_index = ((lid + 1 > grid_depth - 1) ? 0 : lid + 1) * number_of_columns * grid_height + row * number_of_columns + col;
 	INT2_T front_neighbor = checkerboard_agents[front_index];
 	INT2_T back_neighbor = checkerboard_agents[back_index];
-	INT2_T parallel_sum = compute_neighbor_sum<BLOCK_DIMENSION_X, BITXSPIN, INT2_T>(front_neighbor, back_neighbor, shared_tiles[tidz], tidx, tidy, shift_left);
+	INT2_T parallel_sum = compute_neighbor_sum<BLOCK_DIMENSION_X, BITXSPIN, SPIN_X_WORD, INT2_T>(front_neighbor, back_neighbor, shared_tiles[tidz], tidx, tidy, shift_left);
 
 	curandStatePhilox4_32_10_t rng;
 	curand_init(seed, index, static_cast<long long>(2 * SPIN_X_WORD) * (2 * number_of_previous_iterations + COLOR), &rng);
