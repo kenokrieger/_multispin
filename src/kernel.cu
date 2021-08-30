@@ -74,10 +74,8 @@ void validate_grid(const long long grid_width, const long long grid_height, cons
 		exit(EXIT_FAILURE);
 	}
   if (grid_depth % (THREADS_Z)) {
-    if (grid_depth != 1) {
-      fprintf(stderr, "\nPlease specify a grid_depth multiple of %d\n\n", THREADS_Z);
-      exit(EXIT_FAILURE);
-    }
+    fprintf(stderr, "\nPlease specify a grid_depth multiple of %d\n\n", THREADS_Z);
+    exit(EXIT_FAILURE);
   }
 }
 
@@ -99,7 +97,6 @@ char* getDefaultConfigName(char* path)
 {
   int last_slash = 0;
   for (int idx = strlen(path) - 1; idx > 0; idx--) {
-    std::cout << path[idx] << std::endl;
     if (path[idx] == '/') {
       last_slash = idx;
       break;
@@ -110,6 +107,7 @@ char* getDefaultConfigName(char* path)
   strcat(config_name, ".conf");
   return config_name;
 }
+
 
 int main(int argc, char **argv) {
 
@@ -145,31 +143,19 @@ int main(int argc, char **argv) {
 	const size_t words_per_row = (grid_width / 2) / SPIN_X_WORD;
 	const size_t total_words = 2ull * static_cast<size_t>(grid_height) * words_per_row * static_cast<size_t>(grid_depth);
 
-  int zblocks, zthreads;
-  if (grid_depth != 1) {
-    zblocks = DIV_UP(grid_depth, THREADS_Z);
-    zthreads = THREADS_Z;
-  } else {
-    // even if z dimension is not needed, launch with one z-Block with one thread
-    // this allows blockIdx.z to still be accessible in the kernel
-    // and thus does not require any changes in the existing algorithm
-    zblocks = 1;
-    zthreads = 1;
-  }
   // words_per_row / 2 because each entry in the array has two components
-  dim3 blocks(DIV_UP(words_per_row / 2, THREADS_X), DIV_UP(grid_height, THREADS_Y), zblocks);
-  dim3 threads_per_block(THREADS_X, THREADS_Y, zthreads);
+  dim3 blocks(DIV_UP(words_per_row / 2, THREADS_X), DIV_UP(grid_height, THREADS_Y), DIV_UP(grid_depth, THREADS_Z));
+  dim3 threads_per_block(THREADS_X, THREADS_Y, THREADS_Z);
 	const int reduce_blocks = MIN(DIV_UP(total_words, THREADS), (props.maxThreadsPerMultiProcessor / THREADS) * props.multiProcessorCount);
-  const long long total_threads = blocks.x * blocks.y * blocks.z * threads_per_block.x * threads_per_block.y * threads_per_block.z;
 
 	unsigned long long spins_up;
 	unsigned long long spins_down;
-	unsigned long long *sum_d;
+	unsigned long long *d_sum;
 
 	CHECK_CUDA(cudaMalloc(&d_spins, total_words * sizeof(*d_spins)));
 	CHECK_CUDA(cudaMemset(d_spins, 0, total_words * sizeof(*d_spins)));
 
-	CHECK_CUDA(cudaMalloc(&sum_d, 2 * sizeof(*sum_d)));
+	CHECK_CUDA(cudaMalloc(&d_sum, 2 * sizeof(*d_sum)));
 
 	d_black_tiles = d_spins;
 	d_white_tiles = d_spins + total_words / 2;
@@ -179,7 +165,7 @@ int main(int argc, char **argv) {
 	CHECK_CUDA(cudaEventCreate(&start));
 	CHECK_CUDA(cudaEventCreate(&stop));
 
-  // Maybe add in storing the rng states in memory later
+  // const long long total_threads = blocks.x * blocks.y * blocks.z * threads_per_block.x * threads_per_block.y * threads_per_block.z;
   // curandStatePhilox4_32_10_t* states;
   // cudaMalloc((void**) &states, total_threads * sizeof(curandStatePhilox4_32_10_t));
 
@@ -197,14 +183,15 @@ int main(int argc, char **argv) {
   magfile.open(MAG_FILE_NAME);
 	for(iteration = 0; iteration < total_updates; iteration++) {
 		global_market = update<SPIN_X_WORD>(iteration, blocks, threads_per_block, reduce_blocks,
-					 				      	d_black_tiles, d_white_tiles, sum_d, d_probabilities,
+					 				      	d_black_tiles, d_white_tiles, d_sum, d_probabilities,
 					 								spins_up, spins_down,
 					 						  	seed, reduced_alpha, reduced_j,
 	         								grid_height, grid_width, grid_depth,
 					 						  	words_per_row, total_words);
-    std::cout << global_market << std::endl;
+    std::cout << "\r" << global_market;
   	magfile << global_market << std::endl;
 	}
+  std::cout << std::endl;
   magfile.close();
 
 	CHECK_CUDA(cudaEventRecord(stop, 0));
@@ -218,7 +205,7 @@ int main(int argc, char **argv) {
 
 	CHECK_CUDA(cudaFree(d_spins));
 	CHECK_CUDA(cudaFree(d_probabilities));
-	CHECK_CUDA(cudaFree(sum_d));
+	CHECK_CUDA(cudaFree(d_sum));
 
   CHECK_CUDA(cudaSetDevice(0));
   CHECK_CUDA(cudaDeviceReset());
