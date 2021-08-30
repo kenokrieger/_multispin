@@ -1,4 +1,4 @@
 build/*
-!build/.gitkeep
-data/
-crit_temperature/
+!build/info.txt
+*.dat
+*.mp4

@@ -1,0 +1,30 @@
+#! /usr/bin/bash
+echo "Welcome! This is an interactive script to help use the multising binary."
+echo "Please provide a unique session id."
+read SESSION_ID
+SESSION_FOLDER=data/$SESSION_ID
+# If session folder already exists.
+if [ -d "$SESSION_FOLDER" ]; then
+  echo "Data for this session id does already exist."
+  echo "Remove previous data? [y/N]"
+  read CONFIRMATION
+  if [ "$CONFIRMATION" = "y" ]; then
+    rm -r $SESSION_FOLDER/*
+  else
+    echo "Aborting..."
+    exit 1
+  fi
+else
+  mkdir data/$SESSION_ID
+fi
+echo "What do you want to measure?"
+echo "Valid options are: temperature, animation, ..."
+read OPTION
+
+if [ "$OPTION" = "temperature" ]; then
+  echo "session $SESSION_ID" >> data/info.txt
+  echo "Please provide some information about your measurement goal"
+  read GOAL
+  echo "  $GOAL" >> data/info.txt
+  ./analysis/shell_scripts/critical_temperature.sh $SESSION_FOLDER
+fi
