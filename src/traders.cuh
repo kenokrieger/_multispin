@@ -346,7 +346,7 @@ static void dumpLattice(const long long iteration,
 	unsigned long long *black_h = v_h;
 	unsigned long long *white_h = v_h + total_number_of_words / 2;
 
-	snprintf(fname, sizeof(fname), "data/lattices/iteration_%lld.dat", iteration);
+	snprintf(fname, sizeof(fname), "iteration_%lld.dat", iteration);
 	FILE *fp = fopen(fname, "w");
 
 	for(int i = 0; i < rows; i++) {

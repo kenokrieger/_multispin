@@ -2,9 +2,26 @@
 from random import randrange
 from numpy import arange
 from sys import argv
+from os.path import exists
+
+CONFIG_FILE = "temperature.conf"
+
 
 if __name__ == "__main__":
     multising_config = ""
+
+    if not exists(CONFIG_FILE):
+        print(f"Configuration file '{CONFIG_FILE}' not found.")
+        print("Manually create file or abort? [m/A]")
+        procedure = input().strip()
+
+        if procedure == "m":
+            input("Press enter, when you are ready to resume")
+        elif procedure == "A":
+            print("Aborting...")
+            exit()
+
+    tstart, tend, tstep, testruns = -1
     with open("temperature.conf", "r") as f:
         for line in f.readlines():
             if "TSTART" in line:
@@ -18,6 +35,10 @@ if __name__ == "__main__":
             else:
                 multising_config += line
 
+    if tstart == -1 or tend == -1 or tstep == -1 or testruns == -1:
+        print("Missing parameter in configuration file.")
+        exit()
+        
     for run in range(testruns):
         seed = f"\nseed = {randrange(1, 1000000)}"
         for temp in arange(tstart, tend, tstep):

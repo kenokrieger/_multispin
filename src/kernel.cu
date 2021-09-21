@@ -23,6 +23,7 @@ using namespace std;
 
 
 #define MAG_FILE_NAME "magnetisation.dat"
+#define LOG_FILE_NAME "log"
 
 
 map<string, string> read_config_file(string config_filename, string delimiter = "=")
@@ -32,8 +33,8 @@ map<string, string> read_config_file(string config_filename, string delimiter = 
     map<string, string> config;
 
     if (!config_file.is_open()) {
-        std::cout << "Could not open file '" << config_filename << "'" << std::endl;
-        return config;
+        std::cout << "Could not open config file '" << config_filename << "'" << std::endl;
+		    exit(EXIT_FAILURE);
     } else {
         int row = 0;
         std::string line = "";
@@ -200,9 +201,14 @@ int main(int argc, char **argv) {
 
 	CHECK_CUDA(cudaEventElapsedTime(&elapsed_time, start, stop));
 
-	printf("Kernel execution time: %.2f s, %.2lf flips/ns \n",
-		elapsed_time * 1.0E-3, static_cast<double>(total_words * SPIN_X_WORD) * iteration / (elapsed_time * 1.0E+6));
+  double spin_updates_per_nanosecond = static_cast<double>(total_words * SPIN_X_WORD) * iteration / (elapsed_time * 1.0E+6);
+	printf("Kernel execution time: %.2f s, %.2lf flips/ns \n", elapsed_time * 1.0E-3, spin_updates_per_nanosecond);
   printf("Final magnetisation: %f\n", global_market);
+
+  std::ofstream logfile;
+  logfile.open(LOG_FILE_NAME);
+  logfile << "updates/ns: " << spin_updates_per_nanosecond << std::endl;
+  logfile.close();
 
 	CHECK_CUDA(cudaFree(d_spins));
 	CHECK_CUDA(cudaFree(d_probabilities));

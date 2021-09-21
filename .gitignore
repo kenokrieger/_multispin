@@ -2,3 +2,4 @@ build/*
 !build/info.txt
 *.dat
 *.mp4
+*.conf
