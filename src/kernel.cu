@@ -17,9 +17,8 @@ using namespace std;
 #define THREADS 128
 #define BIT_X_SPIN (4)
 
-#define THREADS_X (4)
-#define THREADS_Y (8)
-#define THREADS_Z (8)
+#define THREADS_X (16)
+#define THREADS_Y (16)
 
 
 #define MAG_FILE_NAME "magnetisation.dat"
@@ -63,7 +62,7 @@ map<string, string> read_config_file(string config_filename, string delimiter = 
 }
 
 
-void validate_grid(const long long grid_width, const long long grid_height, const long long grid_depth,
+void validate_grid(const long long grid_width, const long long grid_height,
                    const int spin_x_word)
 {
 	if (!grid_width || (grid_width % 2) || ((grid_width / 2) % (2 * spin_x_word * THREADS_X))) {
@@ -74,10 +73,6 @@ void validate_grid(const long long grid_width, const long long grid_height, cons
 		fprintf(stderr, "\nPlease specify a grid_height multiple of %d\n\n", THREADS_Y);
 		exit(EXIT_FAILURE);
 	}
-  if (grid_depth % (THREADS_Z)) {
-    fprintf(stderr, "\nPlease specify a grid_depth multiple of %d\n\n", THREADS_Z);
-    exit(EXIT_FAILURE);
-  }
 }
 
 
@@ -126,7 +121,6 @@ int main(int argc, char **argv) {
 
   const long long grid_height = std::stoll(config["grid_height"]);
   const long long grid_width = std::stoll(config["grid_width"]);
-  const long long grid_depth = std::stoll(config["grid_depth"]);
   const unsigned int total_updates = std::stoul(config["total_updates"]);
   const unsigned long long seed = std::stoull(config["seed"]);
   float alpha = std::stof(config["alpha"]);
@@ -137,16 +131,16 @@ int main(int argc, char **argv) {
   const float reduced_alpha = -2.0f * beta * alpha;
   const float reduced_j = -2.0f * beta * j;
 
-	validate_grid(grid_width, grid_height, grid_depth, SPIN_X_WORD);
+	validate_grid(grid_width, grid_height, SPIN_X_WORD);
 
   cudaDeviceProp props = identify_gpu();
 
 	const size_t words_per_row = (grid_width / 2) / SPIN_X_WORD;
-	const size_t total_words = 2ull * static_cast<size_t>(grid_height) * words_per_row * static_cast<size_t>(grid_depth);
+	const size_t total_words = 2ull * static_cast<size_t>(grid_height) * words_per_row;
 
   // words_per_row / 2 because each entry in the array has two components
-  dim3 blocks(DIV_UP(words_per_row / 2, THREADS_X), DIV_UP(grid_height, THREADS_Y), DIV_UP(grid_depth, THREADS_Z));
-  dim3 threads_per_block(THREADS_X, THREADS_Y, THREADS_Z);
+  dim3 blocks(DIV_UP(words_per_row / 2, THREADS_X), DIV_UP(grid_height, THREADS_Y));
+  dim3 threads_per_block(THREADS_X, THREADS_Y);
 	const int reduce_blocks = MIN(DIV_UP(total_words, THREADS), (props.maxThreadsPerMultiProcessor / THREADS) * props.multiProcessorCount);
 
 	unsigned long long spins_up;
@@ -162,7 +156,7 @@ int main(int argc, char **argv) {
 	d_white_tiles = d_spins + total_words / 2;
 
 	float *d_probabilities;
-	CHECK_CUDA(cudaMalloc(&d_probabilities, 2 * 7 * sizeof(*d_probabilities)));
+	CHECK_CUDA(cudaMalloc(&d_probabilities, 2 * 5 * sizeof(*d_probabilities)));
 
 	CHECK_CUDA(cudaEventCreate(&start));
 	CHECK_CUDA(cudaEventCreate(&stop));
@@ -171,7 +165,7 @@ int main(int argc, char **argv) {
   // curandStatePhilox4_32_10_t* states;
   // cudaMalloc((void**) &states, total_threads * sizeof(curandStatePhilox4_32_10_t));
 
-	initialise_arrays<unsigned long long>(blocks, threads_per_block, seed, words_per_row / 2, words_per_row / 2 * grid_height,
+	initialise_arrays<unsigned long long>(blocks, threads_per_block, seed, words_per_row / 2,
                                         d_black_tiles, d_white_tiles, percentage_up);
 
 	CHECK_CUDA(cudaSetDevice(0));
@@ -184,12 +178,14 @@ int main(int argc, char **argv) {
 
   magfile.open(MAG_FILE_NAME);
 	for(iteration = 0; iteration < total_updates; iteration++) {
-		global_market = update<SPIN_X_WORD>(iteration, blocks, threads_per_block, reduce_blocks,
-					 				      	d_black_tiles, d_white_tiles, d_sum, d_probabilities,
-					 								spins_up, spins_down,
-					 						  	seed, reduced_alpha, reduced_j,
-	         								grid_height, grid_width, grid_depth,
-					 						  	words_per_row, total_words);
+		global_market = update<SPIN_X_WORD>(
+      iteration, blocks, threads_per_block, reduce_blocks,
+			d_black_tiles, d_white_tiles, d_sum, d_probabilities,
+			spins_up, spins_down,
+			seed, reduced_alpha, reduced_j,
+	    grid_height, grid_width,
+			words_per_row, total_words
+    );
     std::cout << "\r" << global_market << std::flush;
   	magfile << global_market << std::endl;
 	}
