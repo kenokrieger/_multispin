@@ -52,17 +52,18 @@ __global__  void initialise_traders(const unsigned long long seed,
 
 
 template<typename INT_T, typename INT2_T>
-void initialise_arrays(dim3 blocks, dim3 threads_per_block,
+void initialise_arrays(int device_id, dim3 blocks, dim3 threads_per_block,
 								 			 const unsigned long long seed, const unsigned long long number_of_columns,
 								 		 	 INT2_T *__restrict__ d_black_tiles, INT2_T *__restrict__ d_white_tiles,
 								 		 	 float percentage = 0.5f)
 {
-		CHECK_CUDA(cudaSetDevice(0));
+		CHECK_CUDA(cudaSetDevice(device_id));
 		initialise_traders<BIT_X_SPIN, C_BLACK, INT_T>
 		<<<blocks, threads_per_block>>>
 		(seed, number_of_columns, reinterpret_cast<ulonglong2 *>(d_black_tiles), percentage);
 		CHECK_ERROR("initialise_traders");
 
+		CHECK_CUDA(cudaSetDevice(device_id));
 		initialise_traders<BIT_X_SPIN, C_WHITE, INT_T>
 		<<<blocks, threads_per_block>>>
 		(seed, number_of_columns, reinterpret_cast<ulonglong2 *>(d_white_tiles), percentage);
@@ -363,7 +364,8 @@ static void dumpLattice(const long long iteration,
 
 
 template<int SPIN_X_WORD>
-float update(int iteration,
+float update(int device_id,
+						 int iteration,
 					   dim3 blocks, dim3 threads_per_block, const int reduce_blocks,
 						 unsigned long long *d_black_tiles,
 	           unsigned long long *d_white_tiles,
@@ -378,13 +380,15 @@ float update(int iteration,
 					 	 const size_t words_per_row,
 					 	 const size_t total_words)
 {
+		CHECK_CUDA(cudaSetDevice(device_id));
 		countSpins(reduce_blocks, total_words, d_black_tiles, d_sum, &spins_up, &spins_down);
 		double magnetisation = static_cast<double>(spins_up) - static_cast<double>(spins_down);
 		float reduced_magnetisation = magnetisation / static_cast<double>(grid_width * grid_height);
 		float market_coupling = -reduced_alpha * abs(reduced_magnetisation);
+		CHECK_CUDA(cudaSetDevice(device_id));
 		precompute_probabilities(d_probabilities, market_coupling, reduced_j);
 
-		CHECK_CUDA(cudaSetDevice(0));
+		CHECK_CUDA(cudaSetDevice(device_id));
 		update_strategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_BLACK, unsigned long long>
 		<<<blocks, threads_per_block>>>
 		(seed, iteration + 1, (grid_width / 2) / SPIN_X_WORD / 2, grid_height, words_per_row / 2,
@@ -392,7 +396,7 @@ float update(int iteration,
 		 reinterpret_cast<ulonglong2 *>(d_white_tiles),
 		 reinterpret_cast<ulonglong2 *>(d_black_tiles));
 
-		CHECK_CUDA(cudaSetDevice(0));
+		CHECK_CUDA(cudaSetDevice(device_id));
 		update_strategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_WHITE, unsigned long long>
 		<<<blocks, threads_per_block>>>
 		(seed, iteration + 1, (grid_width / 2) / SPIN_X_WORD / 2, grid_height, words_per_row / 2,

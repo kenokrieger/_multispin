@@ -127,6 +127,7 @@ int main(int argc, char **argv) {
   float j = std::stof(config["j"]);
   float beta = std::stof(config["beta"]);
   float percentage_up = std::stof(config["init_up"]);
+  int device_id = std::stoi(config["GPU"]);
 
   const float reduced_alpha = -2.0f * beta * alpha;
   const float reduced_j = -2.0f * beta * j;
@@ -165,7 +166,8 @@ int main(int argc, char **argv) {
   // curandStatePhilox4_32_10_t* states;
   // cudaMalloc((void**) &states, total_threads * sizeof(curandStatePhilox4_32_10_t));
 
-	initialise_arrays<unsigned long long>(blocks, threads_per_block, seed, words_per_row / 2,
+	initialise_arrays<unsigned long long>(device_id, blocks, threads_per_block,
+                                        seed, words_per_row / 2,
                                         d_black_tiles, d_white_tiles, percentage_up);
 
 	CHECK_CUDA(cudaSetDevice(0));
@@ -179,6 +181,7 @@ int main(int argc, char **argv) {
   magfile.open(MAG_FILE_NAME);
 	for(iteration = 0; iteration < total_updates; iteration++) {
 		global_market = update<SPIN_X_WORD>(
+      device_id, 
       iteration, blocks, threads_per_block, reduce_blocks,
 			d_black_tiles, d_white_tiles, d_sum, d_probabilities,
 			spins_up, spins_down,

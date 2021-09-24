@@ -1,11 +1,26 @@
 import numpy as np
-import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 
 
 if __name__ == "__main__":
     magnetisation = np.loadtxt("magnetisation.dat")
-    plt.plot(magnetisation)
-    plt.show()
+    data = [{"type": "scatter",
+             "mode": "lines",
+             "x": np.arange(0, len(magnetisation)),
+             "y": magnetisation}]
+    layout = {"title": {"text": "Relative Magnetisation"},
+              "template": "plotly",
+              "annotations": [{"name": "draft watermark",
+                               "text": "DRAFT",
+                               "textangle": -30,
+                               "opacity": 0.1,
+                               "font": {"color": "black", "size": 100},
+                               "xref": "paper",
+                               "yref": "paper",
+                               "x": 0.5,
+                               "y": 0.5,
+                               "showarrow":False}]
+             }
+    fig = go.Figure({"data": data, "layout": layout})
 
-    plt.plot(np.diff(np.log(magnetisation)))
-    plt.show()
+    fig.write_image("magnetisation.png")
