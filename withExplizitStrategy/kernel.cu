@@ -111,6 +111,8 @@ int main(int argc, char **argv) {
 	unsigned long long *d_spins = NULL;
 	unsigned long long *d_black_tiles = NULL;
 	unsigned long long *d_white_tiles = NULL;
+  unsigned long long *d_black_strategies = NULL;
+  unsigned long long *d_white_strategies = NULL;
 
 	const int SPIN_X_WORD = (8 * sizeof(*d_spins)) / BIT_X_SPIN;
 
@@ -127,9 +129,7 @@ int main(int argc, char **argv) {
   const unsigned long long seed = std::stoull(config["seed"]);
   float alpha = std::stof(config["alpha"]);
   float j = std::stof(config["j"]);
-  float beta_start = std::stof(config["beta_start"]);
-  float beta_end = std::stof(config["beta_end"]);
-  float beta_step = std::stof(config["beta_step"]);
+  float beta = std::stof(config["beta"]);
   float percentage_up = std::stof(config["init_up"]);
 
 	validate_grid(grid_width, grid_height, grid_depth, SPIN_X_WORD);
@@ -138,12 +138,6 @@ int main(int argc, char **argv) {
 
 	const size_t words_per_row = (grid_width / 2) / SPIN_X_WORD;
 	const size_t total_words = 2ull * static_cast<size_t>(grid_height) * words_per_row * static_cast<size_t>(grid_depth);
-
-  int nbetas = (beta_end - beta_start) / beta_step + 1;
-  float* betas = (float* ) malloc(nbetas * sizeof(float));
-  float* timings = (float* ) malloc(nbetas * sizeof(float));
-  for (int i = 0; i < nbetas; i++)
-    betas[i] = beta_end - i * beta_step;
 
   // words_per_row / 2 because each entry in the array has two components
   dim3 blocks(DIV_UP(words_per_row / 2, THREADS_X), DIV_UP(grid_height, THREADS_Y), DIV_UP(grid_depth, THREADS_Z));
@@ -157,7 +151,12 @@ int main(int argc, char **argv) {
 	CHECK_CUDA(cudaMalloc(&d_spins, total_words * sizeof(*d_spins)));
 	CHECK_CUDA(cudaMemset(d_spins, 0, total_words * sizeof(*d_spins)));
 
+  CHECK_CUDA(cudaMalloc(&d_black_strategies, total_words * sizeof(*d_black_strategies)));
+	CHECK_CUDA(cudaMemset(d_black_strategies, 0, total_words * sizeof(*d_black_strategies)));
+  CHECK_CUDA(cudaMalloc(&d_white_strategies, total_words * sizeof(*d_white_strategies)));
+  CHECK_CUDA(cudaMemset(d_white_strategies, 0, total_words * sizeof(*d_white_strategies)));
 	CHECK_CUDA(cudaMalloc(&d_sum, 2 * sizeof(*d_sum)));
+
 
 	d_black_tiles = d_spins;
 	d_white_tiles = d_spins + total_words / 2;
@@ -174,46 +173,40 @@ int main(int argc, char **argv) {
 
 	initialise_arrays<unsigned long long>(blocks, threads_per_block, seed, words_per_row / 2, words_per_row / 2 * grid_height,
                                         d_black_tiles, d_white_tiles, percentage_up);
+  initialise_arrays<unsigned long long>(blocks, threads_per_block, seed, words_per_row / 2, words_per_row / 2 * grid_height,
+                                        d_black_strategies, d_white_strategies, percentage_up);
 
 	CHECK_CUDA(cudaSetDevice(0));
 	CHECK_CUDA(cudaDeviceSynchronize());
 
-  for (int i = 0; i < nbetas; i++) {
-    float beta = betas[i];
-    const float reduced_alpha = -2.0f * beta * alpha;
-    const float reduced_j = -2.0f * beta * j;
+  const float reduced_alpha = -2.0f * beta * alpha;
+  const float reduced_j = -2.0f * beta * j;
 
-  	CHECK_CUDA(cudaEventRecord(start, 0));
-    int iteration;
-    float global_market = 0;
-  	std::ofstream magfile;
+	CHECK_CUDA(cudaEventRecord(start, 0));
+  int iteration;
+  float global_market = 0;
+	std::ofstream magfile;
 
-    magfile.open("magnetisation_beta=" + std::to_string(beta) + ".dat");
-  	for(iteration = 0; iteration < total_updates; iteration++) {
-  		global_market = update<SPIN_X_WORD>(iteration, blocks, threads_per_block, reduce_blocks,
-  					 				      	d_black_tiles, d_white_tiles, d_sum, d_probabilities,
-  					 								spins_up, spins_down,
-  					 						  	seed, reduced_alpha, reduced_j,
-  	         								grid_height, grid_width, grid_depth,
-  					 						  	words_per_row, total_words);
-    	magfile << global_market << std::endl;
-  	}
-    magfile.close();
+  magfile.open("magnetisation_beta=" + std::to_string(beta) + ".dat");
+	for(iteration = 0; iteration < total_updates; iteration++) {
+		global_market = update<SPIN_X_WORD>(iteration, blocks, threads_per_block, reduce_blocks,
+					 				      	d_black_tiles, d_white_tiles,
+                          d_black_strategies, d_white_strategies,
+                          d_sum, d_probabilities,
+					 								spins_up, spins_down,
+					 						  	seed, reduced_alpha, reduced_j,
+	         								grid_height, grid_width, grid_depth,
+					 						  	words_per_row, total_words);
+  	magfile << global_market << std::endl;
+	}
+  magfile.close();
 
-  	CHECK_CUDA(cudaEventRecord(stop, 0));
-  	CHECK_CUDA(cudaEventSynchronize(stop));
+	CHECK_CUDA(cudaEventRecord(stop, 0));
+	CHECK_CUDA(cudaEventSynchronize(stop));
 
-  	CHECK_CUDA(cudaEventElapsedTime(&elapsed_time, start, stop));
+	CHECK_CUDA(cudaEventElapsedTime(&elapsed_time, start, stop));
 
-    double spin_updates_per_nanosecond = static_cast<double>(total_words * SPIN_X_WORD) * iteration / (elapsed_time * 1.0E+6);
-
-    timings[i] = spin_updates_per_nanosecond;
-}
-  std::ofstream logfile;
-  logfile.open("timings.dat";
-  for (int i = 0; i < nbetas; i++)
-    logfile << betas[i] << " " << timings[i] << std::endl;
-  logfile.close();
+  double spin_updates_per_nanosecond = static_cast<double>(total_words * SPIN_X_WORD) * iteration / (elapsed_time * 1.0E+6);
 
 	CHECK_CUDA(cudaFree(d_spins));
 	CHECK_CUDA(cudaFree(d_probabilities));
